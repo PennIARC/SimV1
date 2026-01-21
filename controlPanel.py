@@ -44,6 +44,7 @@ class Endesga:
     greyVD = [50, 50, 50]
     very_light_blue = [199, 207, 221]
     my_blue = [32, 36, 46]
+    darker_my_blue = [16, 18, 21]
     debug_red = [255, 96, 141]
     sebastian_lague_purple = [70, 74, 124]
     sebastian_lague_light_purple = [137, 133, 181]
