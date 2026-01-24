@@ -187,6 +187,8 @@ class DroneHandler:
         self.best_valid_score = None
         self.best_valid_corridor_width = 0
         self.best_corridor_width = 0
+        self.corridor_width = 0
+        self.explored_history = []  # Track actual explored path (world coords)
 
         # Start drones near left edge, spread vertically around middle (y=40)
         for i in range(cp.NUM_DRONES):
@@ -211,6 +213,8 @@ class DroneHandler:
         self.best_valid_score = None
         self.best_valid_corridor_width = 0
         self.best_corridor_width = 0
+        self.corridor_width = 0
+        self.explored_history = []  # Track actual explored path (world coords)
         
         # Mines (copied logic)
         count = random.randint(cp.MINE_COUNT_MIN, cp.MINE_COUNT_MAX)
@@ -218,6 +222,13 @@ class DroneHandler:
             mx = random.uniform(5, cp.ARENA_WIDTH_FT - 5)
             my = random.uniform(1, cp.ARENA_HEIGHT_FT - 1)
             self.mines_truth.append([mx, my])
+
+        # Initial scan: move forward to create the first frontier.
+        scan_distance = 40.0  # feet
+        for d in self.drones:
+            d.clear_waypoints()
+            target_x = min(cp.ARENA_WIDTH_FT - 5.0, d.pos[0] + scan_distance)
+            d.add_waypoint(target_x, d.pos[1])
 
     def get_belief_grid(self):
         """
@@ -369,6 +380,14 @@ class DroneHandler:
         for drone in self.drones:
             drone.set_pid_params(cp.PID_KP, cp.PID_KI, cp.PID_KD)
         
+        # Track explored path history (lead drone position)
+        if self.drones:
+            lead = max(self.drones, key=lambda d: d.pos[0])  # rightmost drone
+            pos = (lead.pos[0], lead.pos[1])
+            # Only add if moved enough (avoid too many points)
+            if not self.explored_history or distance(self.explored_history[-1], pos) > 1.0:
+                self.explored_history.append(pos)
+        
         # Path Planning (receding horizon)
         if self.plan_elapsed >= self.plan_interval:
             self.plan_elapsed = 0.0
@@ -414,17 +433,16 @@ class DroneHandler:
         for d in self.drones:
             d.draw(surface, (ox, oy))
 
-        # Current (future) path visualization
-        if self.world_waypoints:
-            points = []
-            for wx, wy in self.world_waypoints:
+        # Explored path visualization: actual path traced from start (purple)
+        if len(self.explored_history) > 1:
+            explored_points = []
+            for wx, wy in self.explored_history:
                 sx = ox + (wx * cp.PX_PER_FOOT)
                 sy = oy + (wy * cp.PX_PER_FOOT)
-                points.append((sx, sy))
-            if len(points) > 1:
-                width_cells = 1 + 2 * max(0, self.corridor_width)
-                width_px = max(1, int(width_cells * 2 * cp.PX_PER_FOOT))
-                pygame.draw.lines(surface, cp.Endesga.sebastian_lague_light_purple, False, points, width_px)
+                explored_points.append((sx, sy))
+            width_cells = 1 + 2 * max(0, self.corridor_width)
+            width_px = max(1, int(width_cells * 2 * cp.PX_PER_FOOT))
+            pygame.draw.lines(surface, cp.Endesga.sebastian_lague_light_purple, False, explored_points, width_px)
 
         # Historical best path (thicker, different color)
         if self.best_valid_world_waypoints:
