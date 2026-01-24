@@ -2,8 +2,8 @@ import pygame
 
 # --- Simulation Configuration ---
 PX_PER_FOOT = 5.0            # Visual scale
-ARENA_WIDTH_FT = 300.0
-ARENA_HEIGHT_FT = 80.0
+ARENA_WIDTH_FT = 100.0
+ARENA_HEIGHT_FT = 30.0
 BACKGROUND_COLOR = (20, 25, 30)
 
 # --- Physics & Rules ---
@@ -21,8 +21,8 @@ PID_KD = 0.5
 TICK_RATE = 1/60.0
 
 # --- Map Generation ---
-MINE_COUNT_MIN = 300
-MINE_COUNT_MAX = 400
+MINE_COUNT_MIN = 10
+MINE_COUNT_MAX = 50
 MINE_RADIUS_FT = 0.5
 SAFE_DIST_FT = 1.0
 

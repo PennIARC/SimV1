@@ -3,6 +3,7 @@ import math
 import random
 from calcs import distance, normalize_angle
 import controlPanel as cp
+import numpy as np
 
 class PIDController:
     def __init__(self, kp, ki, kd):
@@ -170,10 +171,21 @@ class DroneHandler:
         self.mines_detected = []
         self.trees = []
         self.safe_path = []
+        self.clearance_map = None
+        self.confidence_map = None
+        self.safe_truth = []
+        self.safe_detected = []
         self.elapsed = 0.0
 
-        for i in range(cp.NUM_DRONES):
-            self.drones.append(Drone(i, 5.0, 10.0 + (i * 10.0)))
+        # Initialize drones evenly along the left (start) edge using arena height
+        if cp.NUM_DRONES == 1:
+            start_ys = [cp.ARENA_HEIGHT_FT / 2.0]
+        else:
+            start_ys = [i * (cp.ARENA_HEIGHT_FT) / (cp.NUM_DRONES - 1) for i in range(cp.NUM_DRONES)]
+
+        for i, y in enumerate(start_ys):
+            # place at leftmost column (x=0.0)
+            self.drones.append(Drone(i, 0.0, float(y)))
             
         self.generate_map()
 
@@ -181,6 +193,8 @@ class DroneHandler:
         self.trees = []
         self.mines_truth = []
         self.mines_detected = []
+        self.safe_truth = []
+        self.safe_detected = []
         self.elapsed = 0.0
         
         # Mines (copied logic)
@@ -190,41 +204,155 @@ class DroneHandler:
             my = random.uniform(1, cp.ARENA_HEIGHT_FT - 1)
             self.mines_truth.append([mx, my])
 
-    def plan_paths(self):
-        """
-        Simple AI to keep drones moving.
-        If a drone has no waypoints, give it a new random one.
-        """
-        for drone in self.drones:
-            if not drone.waypoints:
-                # Random waypoint in arena
-                tx = random.uniform(5.0, cp.ARENA_WIDTH_FT - 5.0)
-                ty = random.uniform(5.0, cp.ARENA_HEIGHT_FT - 5.0)
-                drone.add_waypoint(tx, ty)
+        # Generate safe_truth as all integer grid cells not occupied by a mine (rounded)
+        w = int(cp.ARENA_WIDTH_FT) + 1
+        h = int(cp.ARENA_HEIGHT_FT) + 1
+        mine_cells = set((int(round(mx)), int(round(my))) for mx, my in self.mines_truth)
+        for ix in range(w):
+            for iy in range(h):
+                if (ix, iy) not in mine_cells:
+                    self.safe_truth.append([float(ix), float(iy)])
 
-    def update(self, dt):
+    def stop_all_drones(self):
+        """Immediately stop all drones: clear waypoints, zero velocities/accelerations, reset controllers."""
+        for d in self.drones:
+            try:
+                d.clear_waypoints()
+                d.vel = [0.0, 0.0]
+                d.acc = [0.0, 0.0]
+                d.pid_x.reset()
+                d.pid_y.reset()
+                d.active = False
+            except Exception:
+                pass
+
+    def plan_paths(self, waypoints=None):
+        """
+        Assign next-step waypoints for drones.
+        If `waypoints` is None or empty, falls back to per-drone random waypoints
+        (and preserves existing queued waypoints). If `waypoints` is provided,
+        it should be an iterable of (x, y) pairs (one per drone). A None entry
+        for a specific drone means "no external waypoint for that drone".
+        """
+        if waypoints:
+            for i, drone in enumerate(self.drones):
+                if i < len(waypoints) and waypoints[i] is not None:
+                    tx, ty = waypoints[i]
+                    # Only replace the current waypoint if it differs significantly
+                    if drone.waypoints:
+                        cur_tx, cur_ty = drone.waypoints[0]
+                        if abs(cur_tx - tx) < 1e-3 and abs(cur_ty - ty) < 1e-3:
+                            # same waypoint as already queued: keep existing to avoid resetting PID/vel
+                            continue
+                    # new/different waypoint: replace queue (this resets PID/vel as intended)
+                    drone.clear_waypoints()
+                    drone.add_waypoint(float(tx), float(ty))
+                else:
+                    if not drone.waypoints:
+                        tx = random.uniform(5.0, cp.ARENA_WIDTH_FT)
+                        ty = random.uniform(5.0, cp.ARENA_HEIGHT_FT)
+                        drone.add_waypoint(tx, ty)
+        else:
+            # preserve previous behavior when no external waypoints provided
+            for drone in self.drones:
+                if not drone.waypoints:
+                    tx = random.uniform(5.0, cp.ARENA_WIDTH_FT)
+                    ty = random.uniform(5.0, cp.ARENA_HEIGHT_FT)
+                    drone.add_waypoint(tx, ty)
+
+    def update(self, dt, waypoints=None):
+        """
+        Progress simulation by `dt` seconds.
+        If `waypoints` is provided it should be a list/iterable of (x,y)
+        pairs (one per-drone) which will be forwarded to `plan_paths`.
+        """
         self.elapsed += dt
-        
+
         # Update Control Parameters from Global Config (if changed dynamically during runtime)
-        # Assuming cp.PID_KP etc might change if user edits controlPanel live? 
-        # But ordinarily we read once. Let's force update to be safe if user wants real-time tweaking.
         for drone in self.drones:
             drone.set_pid_params(cp.PID_KP, cp.PID_KI, cp.PID_KD)
-        
-        # Path Planning
-        self.plan_paths()
-        
+
+        # Path Planning (may accept external per-drone next-step waypoints)
+        self.plan_paths(waypoints)
+
         # Physics Update
         for drone in self.drones:
             drone.update_physics(dt)
-            
+
             # Sensing
             for mine in self.mines_truth:
                 d = distance(drone.pos, (mine[0], mine[1]))
                 if d < cp.DETECTION_RADIUS_FT:
                     if mine not in self.mines_detected:
                         self.mines_detected.append(mine)
+            
+            for safe in self.safe_truth:
+                d = distance(drone.pos, (safe[0], safe[1]))
+                if d < cp.DETECTION_RADIUS_FT:
+                    if safe not in self.safe_detected:
+                        self.safe_detected.append(safe)
 
+        # Recompute clearance map after sensing updates
+        self.compute_clearance_map()
+
+    def compute_clearance_map(self):
+        """
+        Compute and store self.clearance_map, confidence_map.
+
+        self.clearance_map with semantics:
+          -1.0 = unknown
+           0.0 = mine
+          >0.0 = distance (ft) to nearest detected mine
+        Grid is one cell per foot (0..ARENA_WIDTH_FT, 0..ARENA_HEIGHT_FT).
+        """
+        w = int(cp.ARENA_WIDTH_FT) + 1
+        h = int(cp.ARENA_HEIGHT_FT) + 1
+
+        clearance_map = np.full((h, w), -1.0, dtype=np.float32)
+        # confidence_map = np.full((h, w), 1.0, dtype=np.float32)
+        confidence_map = np.zeros((h, w), dtype=np.float32)
+
+        # Mark detected mines
+        for mx, my in self.mines_detected:
+            ix = int(round(mx))
+            iy = int(round(my))
+            if 0 <= ix < w and 0 <= iy < h:
+                clearance_map[iy, ix] = 0.0
+                confidence_map[iy, ix] = 1.0
+
+        # Mark scanned areas
+        max_clear = float(w + h)
+        for sx, sy in self.safe_detected:
+            ix = int(round(sx))
+            iy = int(round(sy))
+            if 0 <= ix < w and 0 <= iy < h:
+                # compute clearance as distance to nearest true mine
+                if len(self.mines_detected) > 0:
+                    tm = np.array(self.mines_detected)
+                    # Euclidean distance to nearest detected mine
+                    distances = np.sqrt((tm[:, 0] - ix) ** 2 + (tm[:, 1] - iy) ** 2)
+                    clearance_map[iy, ix] = float(distances.min())
+                    # print(clearance_map[iy, ix])
+                else:
+                    # scanned and no detected mines => very large clearance
+                    clearance_map[iy, ix] = max_clear
+                confidence_map[iy, ix] = 1.0
+                               
+        self.clearance_map = clearance_map
+        self.confidence_map = confidence_map
+
+        return confidence_map, clearance_map
+
+    def get_confidence_and_clearance_maps(self):
+        """
+        Returns (confidence_map, clearance_map).
+        Computes them if not already available.
+        """
+        if getattr(self, "clearance_map", None) is None or getattr(self, "confidence_map", None) is None:
+            return self.compute_clearance_map()
+        else:
+            return self.confidence_map, self.clearance_map
+    
     def draw(self, surface, offset=(0, 0)):
         ox, oy = offset
 

@@ -14,6 +14,7 @@ try:
     from calcs import linearGradient, normalize
     import controlPanel as cp
     from droneManager import DroneHandler
+    from path_planning.greedy_path_planning import GreedyBottleneckPlanner
 except ImportError as e:
     print(f"Error: Could not import required modules. {e}")
     sys.exit(1)
@@ -195,10 +196,25 @@ last_time = time.time()
 # Heatmap State
 heatmap_surface = None
 heatmap_needs_update = True
+# Planner freeze state
+planning_enabled = True
+freeze_until = None
 
 # Calculate Centering Offset for the Arena
 offset_x = (VIRTUAL_W - ARENA_PIXEL_W) // 2
 offset_y = (VIRTUAL_H - ARENA_PIXEL_H) // 2
+
+# Planner Setup
+MAP_HEIGHT = int(cp.ARENA_HEIGHT_FT) + 1
+MAP_WIDTH = int(cp.ARENA_WIDTH_FT) + 1
+start_cells = [(0, y) for y in range(MAP_HEIGHT)]
+goal_cells = [(MAP_WIDTH - 1, y) for y in range(MAP_HEIGHT)]
+planner = GreedyBottleneckPlanner(
+    MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells
+)
+
+# Cache the last live path so transient planner failures don't immediately hide the path
+last_live_path = None
 
 pygame.mouse.set_visible(False)
 
@@ -226,8 +242,45 @@ while running:
                 drone_handler.generate_map()
                 heatmap_needs_update = True  # Flag to regenerate heatmap
 
-    # C. Update Simulation
-    drone_handler.update(dt)
+    # C. Do Path planning and update simulation
+    waypoints = None
+    result = None
+    if planning_enabled:
+        confidence_map, clearance_map = drone_handler.get_confidence_and_clearance_maps()
+        result = planner.plan(confidence_map, clearance_map)
+
+        # Update cached live path: only replace when planner returns a valid path
+        if result and isinstance(result, dict) and result.get("path"):
+            last_live_path = result.get("path")
+        else:
+            # keep previous `last_live_path` so transient failures don't hide the path
+            pass
+
+        # If planner reached goal, stop drones and begin freeze timer (show final frame)
+        if result and isinstance(result, dict) and result.get("reached"):
+            print("Planner has found a path to the goal!")
+            print("Final Path:", result)
+            print("Simulation complete — freezing 3s then exit.")
+            drone_handler.stop_all_drones()
+            planning_enabled = False
+            freeze_until = time.time() + 3.0
+
+        # # produce waypoints only while planning enabled
+        # if planning_enabled and result and result.get('path'):
+        #     waypoints = planner.suggest_exploration_targets(result['path'], confidence_map)
+        # else:
+        #     waypoints = None
+        
+        # produce fixed waypoints (evenly spaced along height at right edge)
+        # one target per drone
+        waypoints = planner.fixed_targets(num_drones=len(drone_handler.drones))
+
+        # physics update only while planning enabled
+        if planning_enabled:
+            drone_handler.update(dt, waypoints)
+    else:
+        # planning disabled: don't update physics so the scene appears frozen
+        pass
 
     # Update Heatmap if needed (Static map, so only on regen)
     if heatmap_needs_update:
@@ -272,6 +325,52 @@ while running:
         heatmap_overlay.set_alpha(150)  # Semi-transparent
         screen2.blit(heatmap_overlay, (offset_x, offset_y))
 
+    # 2.a Draw planner paths: persistent (saved) and live (current) if available
+    live_path = None
+    persistent = None
+    persistent = None
+    if result and isinstance(result, dict):
+        persistent = result.get("persistent_path") if "persistent_path" in result else getattr(planner, "persistent_best", None)
+        live_path = result.get("path") or last_live_path
+    else:
+        persistent = getattr(planner, "persistent_best", None)
+        live_path = last_live_path
+
+    # Helper to convert path cells to screen points
+    def to_screen(path):
+        pts = []
+        for px, py in path:
+            sx = offset_x + (px * cp.PX_PER_FOOT)
+            sy = offset_y + (py * cp.PX_PER_FOOT)
+            pts.append((int(sx), int(sy)))
+        return pts
+
+    # Draw persistent path first (if present) in a cool color
+    if persistent and len(persistent) >= 2:
+        persistent_pts = to_screen(persistent)
+        try:
+            pygame.draw.aalines(screen2, (100, 180, 255), False, persistent_pts)
+        except Exception:
+            pass
+        for p in persistent_pts:
+            pygame.draw.circle(screen2, (80, 150, 230), (int(p[0]), int(p[1])), 4)
+
+    # Draw live path on top (if present) in gold
+    if live_path and len(live_path) >= 2:
+        live_pts = to_screen(live_path)
+        try:
+            pygame.draw.aalines(screen2, (255, 215, 0), False, live_pts)
+        except Exception:
+            pass
+        for p in live_pts:
+            pygame.draw.circle(screen2, (255, 200, 50), (int(p[0]), int(p[1])), 5)
+
+    # Draw drone start markers for reference
+    for d in drone_handler.drones:
+        sx = int(offset_x + d.pos[0] * cp.PX_PER_FOOT)
+        sy = int(offset_y + d.pos[1] * cp.PX_PER_FOOT)
+        pygame.draw.circle(screen2, (255, 100, 100), (sx, sy), 6)
+
     # 3. Draw UI
     if toggle:
         items = {
@@ -307,6 +406,14 @@ while running:
         clock.tick(fps)
     except Exception as e:
         print(f"Render Error: {e}")
+        running = False
+
+    # If we entered freeze mode, ensure we hold the final frame for the remaining time
+    if freeze_until is not None:
+        remaining = freeze_until - time.time()
+        if remaining > 0:
+            time.sleep(remaining)
+        # after freeze, exit main loop
         running = False
 
 pygame.quit()
