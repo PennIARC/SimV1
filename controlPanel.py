@@ -20,6 +20,12 @@ PID_KI = 0.0
 PID_KD = 0.5
 TICK_RATE = 1/60.0
 
+# --- Planner Selection ---
+# Options: "greedy", "greedy_rrt", "dubins"
+PLANNER_TYPE = "greedy_rrt"
+RRT_TIME_BUDGET = 0.15
+DUBINS_TURN_RADIUS = 6.0
+
 # --- Map Generation ---
 MINE_COUNT_MIN = 300
 MINE_COUNT_MAX = 400
