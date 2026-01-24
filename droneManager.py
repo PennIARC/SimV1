@@ -160,7 +160,8 @@ class Drone:
              for wx, wy in self.waypoints:
                  wsx = (wx * cp.PX_PER_FOOT) + arena_offset[0]
                  wsy = (wy * cp.PX_PER_FOOT) + arena_offset[1]
-                 pygame.draw.circle(surface, cp.Endesga.debug_red, (int(wsx), int(wsy)), 3)
+                 pygame.draw.circle(surface, cp.Endesga.network_green, (int(wsx), int(wsy)), 3, 1)
+                 pygame.draw.circle(surface, cp.Endesga.network_green, (int(wsx), int(wsy)), 1)
 
 
 class DroneHandler:
@@ -171,6 +172,18 @@ class DroneHandler:
         self.trees = []
         self.safe_path = []
         self.elapsed = 0.0
+
+        # Control hyperparams
+        self.distForNorm = ((cp.ARENA_WIDTH_FT / cp.PX_PER_FOOT) ** 2 + (cp.ARENA_HEIGHT_FT / cp.PX_PER_FOOT) ** 2) ** 0.5
+        self.droneRepulsionWeight = 0.0
+        self.attractionToCenterlineWeight = 1.0
+        self.mineRepulsionWeight = 0.0
+        self.attractionToEndzoneWeight = 0.0
+
+        self.waypointGranularity = 10
+        self.wayPointGranularityTicker = 0
+        self.wayPointExtensionLength = 2.0
+
 
         for i in range(cp.NUM_DRONES):
             self.drones.append(Drone(i, 5.0, 10.0 + (i * 10.0)))
@@ -187,20 +200,41 @@ class DroneHandler:
         count = random.randint(cp.MINE_COUNT_MIN, cp.MINE_COUNT_MAX)
         for _ in range(count):
             mx = random.uniform(5, cp.ARENA_WIDTH_FT - 5)
-            my = random.uniform(1, cp.ARENA_HEIGHT_FT - 1)
+            my = random.uniform(5, cp.ARENA_HEIGHT_FT - 5)
             self.mines_truth.append([mx, my])
 
     def plan_paths(self):
-        """
-        Simple AI to keep drones moving.
-        If a drone has no waypoints, give it a new random one.
-        """
-        for drone in self.drones:
-            if not drone.waypoints:
-                # Random waypoint in arena
-                tx = random.uniform(5.0, cp.ARENA_WIDTH_FT - 5.0)
-                ty = random.uniform(5.0, cp.ARENA_HEIGHT_FT - 5.0)
-                drone.add_waypoint(tx, ty)
+        # """
+        # Simple AI to keep drones moving.
+        # If a drone has no waypoints, give it a new random one.
+        # """
+        # for drone in self.drones:
+        #     if not drone.waypoints:
+        #         # Random waypoint in arena
+        #         tx = random.uniform(5.0, cp.ARENA_WIDTH_FT - 5.0)
+        #         ty = random.uniform(5.0, cp.ARENA_HEIGHT_FT - 5.0)
+        #         drone.add_waypoint(tx, ty)
+        
+        self.wayPointGranularityTicker += 1
+        if self.wayPointGranularityTicker >= self.waypointGranularity:
+            self.wayPointGranularityTicker = 0
+
+            for drone in self.drones:
+                gradX, gradY = 0.0, 0.0
+                for otherDrone in self.drones:
+                    if drone != otherDrone:
+                        gradX += (drone.pos[0] - otherDrone.pos[0]) / self.distForNorm * self.droneRepulsionWeight
+                        gradY += (drone.pos[1] - otherDrone.pos[1]) / self.distForNorm * self.droneRepulsionWeight
+
+                for mine in self.mines_detected:
+                    gradX += (drone.pos[0] - mine[0]) / self.distForNorm * self.mineRepulsionWeight
+                    gradY += (drone.pos[1] - mine[1]) / self.distForNorm * self.mineRepulsionWeight
+
+                gradY += (cp.ARENA_HEIGHT_FT / 2 - drone.pos[1]) / self.distForNorm * self.attractionToCenterlineWeight
+
+                gradX += (((cp.ARENA_WIDTH_FT - drone.pos[0]) / self.distForNorm) ** (0.5)) * self.attractionToEndzoneWeight
+                
+                drone.add_waypoint(drone.pos[0] + gradX * self.wayPointExtensionLength, drone.pos[1] + gradY * self.wayPointExtensionLength)
 
     def update(self, dt):
         self.elapsed += dt
@@ -223,14 +257,17 @@ class DroneHandler:
                 d = distance(drone.pos, (mine[0], mine[1]))
                 if d < cp.DETECTION_RADIUS_FT:
                     if mine not in self.mines_detected:
-                        self.mines_detected.append(mine)
+                        # Ensure mine is within bounds (visual sanity check)
+                        if 0 <= mine[0] <= cp.ARENA_WIDTH_FT and 0 <= mine[1] <= cp.ARENA_HEIGHT_FT:
+                            self.mines_detected.append(mine)
 
-    def draw(self, surface, offset=(0, 0)):
+    def draw(self, surface, offset=(0, 0), draw_bg=True):
         ox, oy = offset
 
         # Draw Arena
         rect = pygame.Rect(ox, oy, cp.ARENA_WIDTH_FT * cp.PX_PER_FOOT, cp.ARENA_HEIGHT_FT * cp.PX_PER_FOOT)
-        pygame.draw.rect(surface, cp.BACKGROUND_COLOR, rect)
+        if draw_bg:
+            pygame.draw.rect(surface, cp.BACKGROUND_COLOR, rect)
         pygame.draw.rect(surface, cp.Endesga.grey_blue, rect, 2)
 
         # Grid
@@ -243,12 +280,12 @@ class DroneHandler:
             if m not in self.mines_detected:
                 mx = ox + (m[0] * cp.PX_PER_FOOT)
                 my = oy + (m[1] * cp.PX_PER_FOOT)
-                pygame.draw.circle(surface, (40, 45, 55), (int(mx), int(my)), 1)
+                pygame.draw.circle(surface, (40, 45, 55), (int(mx), int(my)), 2)
                 
         for m in self.mines_detected:
             mx = ox + (m[0] * cp.PX_PER_FOOT)
             my = oy + (m[1] * cp.PX_PER_FOOT)
-            pygame.draw.circle(surface, cp.Endesga.network_red, (int(mx), int(my)), 2)
+            pygame.draw.circle(surface, cp.Endesga.network_red, (int(mx), int(my)), 3, 2)
 
         # Drones
         for d in self.drones:

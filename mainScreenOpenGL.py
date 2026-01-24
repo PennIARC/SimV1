@@ -42,8 +42,8 @@ HEAT_EFFECTIVE_STEP = HEAT_TILE_SIZE + HEAT_TILE_GAP
 ARENA_PIXEL_W = int(cp.ARENA_WIDTH_FT * cp.PX_PER_FOOT)
 ARENA_PIXEL_H = int(cp.ARENA_HEIGHT_FT * cp.PX_PER_FOOT)
 
-GRID_COLS = ARENA_PIXEL_W // HEAT_EFFECTIVE_STEP
-GRID_ROWS = ARENA_PIXEL_H // HEAT_EFFECTIVE_STEP
+GRID_COLS = math.ceil(ARENA_PIXEL_W / HEAT_EFFECTIVE_STEP)
+GRID_ROWS = math.ceil(ARENA_PIXEL_H / HEAT_EFFECTIVE_STEP)
 
 # Colors for Heatmap: Red (Close to Mine) -> Green (Safe)
 HEAT_PALETTE = [[200, 40, 80], [40, 100, 120]]
@@ -264,13 +264,9 @@ while running:
     # OR we draw DroneHandler first, then blend Heatmap on top using Multiply or Add.
 
     # Let's try: Draw DroneHandler (Standard), then Overlay Heatmap with transparency.
-    drone_handler.draw(screen2, (offset_x, offset_y))
+    drone_handler.draw(screen2, (offset_x, offset_y), draw_bg=False)
 
-    if heatmap_surface:
-        # Draw heatmap with partial transparency on top of the arena
-        heatmap_overlay = heatmap_surface.copy()
-        heatmap_overlay.set_alpha(150)  # Semi-transparent
-        screen2.blit(heatmap_overlay, (offset_x, offset_y))
+
 
     # 3. Draw UI
     if toggle:
