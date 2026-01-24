@@ -1,34 +1,55 @@
-import pygame
+from config_loader import get_config
 
-# --- Simulation Configuration ---
-PX_PER_FOOT = 5.0            # Visual scale
-ARENA_WIDTH_FT = 300.0
-ARENA_HEIGHT_FT = 80.0
-BACKGROUND_COLOR = (20, 25, 30)
+# Load Initial Config
+config = get_config()
 
-# --- Physics & Rules ---
-NUM_DRONES = 4
-DRONE_RADIUS_FT = 0.5        # Physical collision radius
-DETECTION_RADIUS_FT = 5.0   # Sensing radius
-MAX_SPEED_FT = 12.0          # ft/s
-MAX_ACCEL_FT = 20.0          # ft/s^2 (Approx 2 seconds to max speed if 6, let's make it snappy)
-TURN_RATE_RAD = 3.0          # rad/s
+# Helper to reload constants if config updates
+def reload():
+    global config
+    config = get_config()
+    
+    # --- Simulation Configuration ---
+    global PX_PER_FOOT, ARENA_WIDTH_FT, ARENA_HEIGHT_FT, BACKGROUND_COLOR
+    PX_PER_FOOT = float(config['visuals']['px_per_foot'])
+    ARENA_WIDTH_FT = float(config['arena']['width_ft'])
+    ARENA_HEIGHT_FT = float(config['arena']['height_ft'])
+    BACKGROUND_COLOR = tuple(config['visuals']['background_color'])
+    
+    # --- Physics & Rules ---
+    global NUM_DRONES, DETECTION_RADIUS_FT, MAX_SPEED_FT, MAX_ACCEL_FT, TURN_RATE_RAD, DRONE_RADIUS_FT
+    NUM_DRONES = int(config['drone']['count'])
+    DETECTION_RADIUS_FT = float(config['drone']['detection_radius_ft'])
+    MAX_SPEED_FT = float(config['physics']['max_speed_ft'])
+    MAX_ACCEL_FT = float(config['physics']['max_accel_ft'])
+    TURN_RATE_RAD = float(config['physics']['turn_rate_rad'])
+    DRONE_RADIUS_FT = float(config['drone']['radius_ft'])
+    
+    # --- PID Control ---
+    global PID_KP, PID_KI, PID_KD, TICK_RATE
+    PID_KP = float(config['physics']['pid']['kp'])
+    PID_KI = float(config['physics']['pid']['ki'])
+    PID_KD = float(config['physics']['pid']['kd'])
+    TICK_RATE = float(config['physics']['tick_rate'])
+    
+    # --- Map Generation ---
+    global MINE_COUNT_MIN, MINE_COUNT_MAX, MINE_RADIUS_FT, SAFE_DIST_FT
+    MINE_COUNT_MIN = int(config['map']['mine_count_min'])
+    MINE_COUNT_MAX = int(config['map']['mine_count_max'])
+    MINE_RADIUS_FT = float(config['map']['mine_radius_ft'])
+    SAFE_DIST_FT = float(config['map']['safe_dist_ft'])
+    
+    # --- Visuals ---
+    global VISUAL_DRONE_SIZE, GRID_LINE_SPACING
+    VISUAL_DRONE_SIZE = float(config['visuals']['drone_size'])
+    GRID_LINE_SPACING = int(config['visuals']['grid_line_spacing_ft'])
+    
+    # --- IARC Scoring ---
+    global GREEN_ZONE_SQUARES, WEIGHT_PENALTY_OZ
+    GREEN_ZONE_SQUARES = int(config['scoring']['green_zone_squares'])
+    WEIGHT_PENALTY_OZ = float(config['scoring']['weight_penalty_oz'])
 
-# --- PID Control ---
-PID_KP = 2.0
-PID_KI = 0.0
-PID_KD = 0.5
-TICK_RATE = 1/60.0
-
-# --- Map Generation ---
-MINE_COUNT_MIN = 300
-MINE_COUNT_MAX = 400
-MINE_RADIUS_FT = 0.5
-SAFE_DIST_FT = 1.0
-
-# --- Visuals ---
-VISUAL_DRONE_SIZE = 1.0      # Scale factor for drone drawing
-GRID_LINE_SPACING = 50       # Feet
+# Execute initial load
+reload()
 
 
 

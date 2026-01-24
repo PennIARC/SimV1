@@ -1,0 +1,87 @@
+# IARC 2026 Simulation Configuration
+# ===================================
+
+# Algorithm Selection
+# ===================
+
+# 1. Drone Path Planning (How drones move/scan)
+# Options: simple_spacing, greedy_path, astar_path
+drone_planning:
+  algorithm: simple_spacing
+  
+# 2. Human Path Planning (Safe path calculation)
+# Options: safe_path_bottleneck
+human_planning:
+  algorithm: safe_path_bottleneck
+
+# Drone Configuration
+drone:
+  count: 4                    # Number of drones in the swarm
+  detection_radius_ft: 5.0    # Detection radius in feet
+  radius_ft: 0.5              # Physical radius of drone
+  spacing_margin_ft: 1.0      # Extra margin between drone coverage areas
+  start_x_ft: 5.0             # Starting X position (left side of arena)
+
+# Path Planning Parameters
+path:
+  waypoint_tolerance_ft: 1.0  # Distance to consider waypoint reached
+  return_after_scan: false    # Drones only go one direction
+  scan_direction: "forward"   # forward = left-to-right, backward = right-to-left
+
+# Arena Configuration (should match controlPanel.py)
+arena:
+  width_ft: 300.0
+  height_ft: 80.0
+
+# Physics & PID Control
+physics:
+  max_speed_ft: 12.0
+  max_accel_ft: 20.0
+  turn_rate_rad: 3.0
+  tick_rate: 0.0166  # 1/60
+  pid:
+    kp: 2.0
+    ki: 0.0
+    kd: 0.5
+
+# Map Generation
+map:
+  mine_count_min: 300
+  mine_count_max: 400
+  mine_radius_ft: 0.5
+  safe_dist_ft: 1.0
+
+# Visuals
+visuals:
+  window_width: 1600
+  window_height: 900
+  fps: 60
+  scale_down_factor: 1
+  px_per_foot: 5.0
+  drone_size: 1.0
+  grid_line_spacing_ft: 50
+  background_color: [20, 25, 30]
+
+# Scoring Parameters (IARC Formula)
+scoring:
+  green_zone_squares: 1       # G in the formula: W = 2 * (1 + 2G)
+  weight_penalty_oz: 0        # N in the formula: ounces over 1 pound limit
+
+# Algorithm-Specific Parameters
+algorithms:
+  # Drone Algorithms
+  simple_spacing:
+    overlap_factor: 0.0       # How much detection circles should overlap (0 = touching, 0.5 = 50% overlap)
+  
+  greedy_path:
+    lookahead_steps: 5        # How many steps to look ahead for optimization
+    mine_weight: 1.0          # Weight for mine coverage in scoring
+    length_weight: 1.0        # Weight for path length in scoring
+  
+  astar_path:
+    grid_resolution_ft: 5.0   # Resolution of the A* grid
+    heuristic_weight: 1.0     # Weight for heuristic (>1 = faster but less optimal)
+
+  # Human Algorithms
+  safe_path_bottleneck:
+    resolution_ft: 1.0        # Resolution of the safe path grid

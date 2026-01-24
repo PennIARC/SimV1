@@ -133,10 +133,12 @@ pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
 pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
 pygame.display.gl_set_attribute(pygame.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG, True)
 
-# 2. Setup Window
-screen = pygame.display.set_mode((0, 0), pygame.OPENGL | pygame.DOUBLEBUF | pygame.FULLSCREEN)
-info = pygame.display.Info()
-WINDOW_WIDTH, WINDOW_HEIGHT = info.current_w, info.current_h
+# 2. Setup Window - Use windowed mode for better visibility
+config = cp.get_config()
+WINDOW_WIDTH = int(config['visuals']['window_width'])
+WINDOW_HEIGHT = int(config['visuals']['window_height'])
+screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE)
+pygame.display.set_caption("IARC 2026 Simulation")
 
 # 3. Create ModernGL Context
 try:
@@ -149,10 +151,10 @@ ctx.enable(moderngl.BLEND)
 
 # 4. Game Logic Variables
 clock = pygame.time.Clock()
-fps = 60
+fps = int(config['visuals']['fps'])
 # Keep scale 1:1 for simulation accuracy, or adjust if you want pixel art style
 # Given the Sim uses 5px per foot, 1:1 is usually best for clarity.
-scaleDownFactor = 1
+scaleDownFactor = int(config['visuals']['scale_down_factor'])
 
 # Virtual Resolution
 VIRTUAL_W = int(WINDOW_WIDTH / scaleDownFactor)
@@ -277,7 +279,9 @@ while running:
         items = {
             "FPS": round(clock.get_fps()),
             "Time": f"{drone_handler.elapsed:.1f}s",
+            "Phase": drone_handler.get_phase().upper(),
             "Detected": f"{len(drone_handler.mines_detected)} / {len(drone_handler.mines_truth)}",
+            "Score": drone_handler.get_score_string(),
             "Controls": "[R] Reset  [ESC] Quit  [SPACE] UI"
         }
 
