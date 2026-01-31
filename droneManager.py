@@ -6,7 +6,7 @@ import controlPanel as cp
 from iarc.integrations.simv1_adapter import plan_for_simv1
 from iarc.scoring.score import score_path
 from iarc.core.types import PathPlan
-from iarc.swarm.allocator import DroneState, allocate_receding
+from iarc.swarm.strategy_frontier import allocate_frontier
 
 class PIDController:
     def __init__(self, kp, ki, kd):
@@ -76,68 +76,56 @@ class Drone:
     def update_physics(self, dt):
         if not self.active: return
         
-        # 1. Determine Target
-        target = None
-        if self.waypoints:
-            target = self.waypoints[0]
-            
+        target = self.waypoints[0] if self.waypoints else None
+        
         if target:
-            # 2. Calculate Error
             error_x = target[0] - self.pos[0]
             error_y = target[1] - self.pos[1]
             
-            # 3. PID Update (Output is Desired Acceleration)
             acc_x = self.pid_x.update(error_x, dt)
             acc_y = self.pid_y.update(error_y, dt)
             
-            # 4. Clamp Acceleration
-            current_acc_mag = math.sqrt(acc_x**2 + acc_y**2)
-            if current_acc_mag > cp.MAX_ACCEL_FT:
-                scale = cp.MAX_ACCEL_FT / current_acc_mag
+            # Clamp acceleration
+            acc_mag = math.sqrt(acc_x**2 + acc_y**2)
+            if acc_mag > cp.MAX_ACCEL_FT:
+                scale = cp.MAX_ACCEL_FT / acc_mag
                 acc_x *= scale
                 acc_y *= scale
-                
             self.acc = [acc_x, acc_y]
             
-            # Check for waypoint completion (within small radius)
-            dist_to_target = math.sqrt(error_x**2 + error_y**2)
-            if dist_to_target < 1.0: # 1 foot tolerance
-                self.waypoints.pop(0) 
-                # Don't reset PID immediately to maintain flow? 
-                # Actually, if we pop, the next waypoint becomes target. 
-                # If no waypoints left, we might overshoot if not handled.
+            # Check waypoint completion
+            if math.sqrt(error_x**2 + error_y**2) < 1.0:
+                self.waypoints.pop(0)
                 if not self.waypoints:
-                    # Stop if no more waypoints
                     self.pid_x.reset()
                     self.pid_y.reset()
-                    self.vel = [0.0, 0.0] # Hard stop or friction?
+                    self.vel = [0.0, 0.0]
                     self.acc = [0.0, 0.0]
         else:
-            # No target, apply friction/damping to stop
             self.acc = [0.0, 0.0]
             self.vel[0] *= 0.9
             self.vel[1] *= 0.9
             
-        # 5. Integrate Acceleration -> Velocity
+        # Integrate velocity
         self.vel[0] += self.acc[0] * dt
         self.vel[1] += self.acc[1] * dt
         
-        # 6. Clamp Velocity
+        # Clamp velocity
         speed = math.sqrt(self.vel[0]**2 + self.vel[1]**2)
         if speed > cp.MAX_SPEED_FT:
             scale = cp.MAX_SPEED_FT / speed
             self.vel[0] *= scale
             self.vel[1] *= scale
             
-        # 7. Integrate Velocity -> Position
+        # Integrate position
         self.pos[0] += self.vel[0] * dt
         self.pos[1] += self.vel[1] * dt
         
-        # 8. Arena Bounds Clamping (Hard limit)
+        # Clamp to arena bounds
         self.pos[0] = max(0.0, min(cp.ARENA_WIDTH_FT, self.pos[0]))
         self.pos[1] = max(0.0, min(cp.ARENA_HEIGHT_FT, self.pos[1]))
         
-        # 9. Update Draw Angle (visual only)
+        # Update visual angle
         if speed > 0.1:
             self.draw_angle = math.atan2(self.vel[1], self.vel[0])
 
@@ -170,64 +158,40 @@ class Drone:
 class DroneHandler:
     def __init__(self):
         self.drones = []
-        self.mines_truth = []
-        self.mines_detected = []
-        self.trees = []
-        self.safe_path = []
-        self.elapsed = 0.0
-        self.tick = 0
-        self.last_alloc_tick = -999
-        self.plan_interval = 0.5
-        self.plan_elapsed = 0.0
-        self.last_allocations = {}
-        self.world_waypoints = []
-        self.best_world_waypoints = []
-        self.best_score = None
-        self.best_valid_world_waypoints = []
-        self.best_valid_score = None
-        self.best_valid_corridor_width = 0
-        self.best_corridor_width = 0
-        self.corridor_width = 0
-        self.explored_history = []  # Track actual explored path (world coords)
-
-        # Start drones near left edge, spread vertically around middle (y=40)
+        # Spread drones vertically across the arena
+        spacing = cp.ARENA_HEIGHT_FT / (cp.NUM_DRONES + 1)
         for i in range(cp.NUM_DRONES):
-            start_y = 30.0 + (i * 5.0)  # y: 30, 35, 40, 45 (near path start at y=41)
+            start_y = spacing * (i + 1)  # Spread across height
             self.drones.append(Drone(i, 3.0, start_y))
-            
         self.generate_map()
 
     def generate_map(self):
-        self.trees = []
+        # Core state
         self.mines_truth = []
         self.mines_detected = []
+        self.safe_path = []
+        self.world_waypoints = []
+        self.current_corridor_width = 0
+        
+        # Timing
         self.elapsed = 0.0
         self.tick = 0
-        self.last_alloc_tick = -999
         self.plan_elapsed = 0.0
-        self.last_allocations = {}
-        self.world_waypoints = []
-        self.best_world_waypoints = []
-        self.best_score = None
-        self.best_valid_world_waypoints = []
-        self.best_valid_score = None
-        self.best_valid_corridor_width = 0
-        self.best_corridor_width = 0
-        self.corridor_width = 0
-        self.explored_history = []  # Track actual explored path (world coords)
+        self.plan_interval = 0.5
         
-        # Mines (copied logic)
+        # Generate mines
         count = random.randint(cp.MINE_COUNT_MIN, cp.MINE_COUNT_MAX)
         for _ in range(count):
             mx = random.uniform(5, cp.ARENA_WIDTH_FT - 5)
             my = random.uniform(1, cp.ARENA_HEIGHT_FT - 1)
             self.mines_truth.append([mx, my])
 
-        # Initial scan: move forward to create the first frontier.
-        scan_distance = 40.0  # feet
-        for d in self.drones:
+        # Initial scan: drones spread out and move forward
+        for i, d in enumerate(self.drones):
             d.clear_waypoints()
-            target_x = min(cp.ARENA_WIDTH_FT - 5.0, d.pos[0] + scan_distance)
+            # Spread drones in a fan pattern forward
+            forward_dist = 30.0 + (i * 10.0)  # Different distances for each drone
+            target_x = min(cp.ARENA_WIDTH_FT - 5.0, d.pos[0] + forward_dist)
             d.add_waypoint(target_x, d.pos[1])
 
     def get_belief_grid(self):
@@ -265,7 +229,7 @@ class DroneHandler:
 
     def plan_paths(self):
         """
-        Plan paths using greedy_bottleneck algorithm.
+        Plan paths using greedy_bottleneck algorithm with FIXED START.
         Drones fly left to right (along X axis = columns).
         """
         belief_grid = self.get_belief_grid()
@@ -276,11 +240,8 @@ class DroneHandler:
         num_rows = int(cp.ARENA_HEIGHT_FT / 2)   # 40
         num_cols = int(cp.ARENA_WIDTH_FT / 2)    # 150
 
-        # Start: current lead drone position (avoids initial "move left" correction)
-        lead = self.drones[0]
-        start_row = int(lead.pos[1] / 2)
-        start_col = int(lead.pos[0] / 2)
-        start = (max(0, min(num_rows - 1, start_row)), max(0, min(num_cols - 1, start_col)))
+        # FIXED START: middle of Y-axis, left edge (Row 20, Col 0)
+        start = (20, 0)
 
         # Goals: right edge (col=149), all rows
         goals = [(r, num_cols - 1) for r in range(num_rows)]
@@ -306,101 +267,57 @@ class DroneHandler:
         )
 
         self.safe_path = plan.path
-        self.corridor_width = plan.g_width
+        self.current_corridor_width = plan.g_width
 
-        # Convert grid path to world coordinates (feet) for drones
-        world_waypoints = []
-        for (row, col) in plan.path:
-            world_x = col * 2 + 1  # center of cell in feet
-            world_y = row * 2 + 1
-            world_waypoints.append((world_x, world_y))
-        self.world_waypoints = world_waypoints
+        # Convert grid path to world coordinates (feet)
+        self.world_waypoints = [(col * 2 + 1, row * 2 + 1) for (row, col) in plan.path]
 
-        # Track current path for visualization (updates every replan).
-        truth_grid = [[0 for _ in range(num_cols)] for _ in range(num_rows)]
-        for mx, my in self.mines_truth:
-            col = int(mx / 2)
-            row = int(my / 2)
-            if 0 <= row < num_rows and 0 <= col < num_cols:
-                truth_grid[row][col] = 1
-        path_for_score = self._ensure_4_connected(plan.path)
-        commands = PathPlan(plan.start, path_for_score, plan.g_width, 0, 0).to_commands()
-        report = score_path(truth_grid, commands, a_minutes=min(self.elapsed / 60.0, 7.0))
-        self.best_score = report.score
-        self.best_world_waypoints = list(world_waypoints)
-        self.best_corridor_width = plan.g_width
-        if report.fail_reason is None:
-            if self.best_valid_score is None or report.score > self.best_valid_score:
-                self.best_valid_score = report.score
-                self.best_valid_world_waypoints = list(world_waypoints)
-                self.best_valid_corridor_width = plan.g_width
-
-        # Print path info (only when path changes)
-        if not hasattr(self, '_last_path_len') or self._last_path_len != len(plan.path):
+        # Log path changes
+        if getattr(self, '_last_path_len', None) != len(plan.path):
             self._last_path_len = len(plan.path)
-            print(f"[Planner] Path: {len(plan.path)} waypoints, G-width: {plan.g_width}, Detected mines: {len(self.mines_detected)}")
-            if len(plan.path) <= 10:
-                print(f"  Waypoints (ft): {world_waypoints}")
-            else:
-                print(f"  First 5: {world_waypoints[:5]} ... Last 5: {world_waypoints[-5:]}")
+            print(f"[Planner] {len(plan.path)} pts, G={plan.g_width}, mines={len(self.mines_detected)}")
 
-        assignments, self.last_alloc_tick = allocate_receding(
-            [DroneState(d.id, (int(d.pos[1] / 2), int(d.pos[0] / 2)), False) for d in self.drones],
-            belief_grid,
-            plan.path,
-            tick=self.tick,
-            last_replan_tick=self.last_alloc_tick,
-            replan_interval=15,
-            min_target_sep=4,
-            max_targets=20,
-        )
+        # Allocate drones to frontier targets
+        drone_positions = [(int(d.pos[1] / 2), int(d.pos[0] / 2)) for d in self.drones]
+        assignments = allocate_frontier(drone_positions, belief_grid)
+        
         if assignments:
-            new_allocations = {a.drone_id: a.target for a in assignments}
-            if new_allocations != self.last_allocations:
-                print(f"[Allocator] tick={self.tick} assignments={new_allocations}")
-                self.last_allocations = new_allocations
-            for drone in self.drones:
-                if drone.id in new_allocations:
-                    row, col = new_allocations[drone.id]
-                    drone.clear_waypoints()
-                    drone.add_waypoint(col * 2 + 1, row * 2 + 1)
+            targets_dict = {}
+            for i, (drone_pos, target_pos) in enumerate(assignments):
+                if i < len(self.drones):
+                    target_x = target_pos[1] * 2 + 1  # col to feet
+                    target_y = target_pos[0] * 2 + 1  # row to feet
+                    targets_dict[i] = (target_x, target_y)
+                    self.drones[i].clear_waypoints()
+                    self.drones[i].add_waypoint(target_x, target_y)
+            if self.tick % 100 == 0:  # Print every 100 ticks
+                print(f"[Frontier] tick={self.tick} targets={targets_dict}")
         else:
+            # Fallback: follow the planned path
             for drone in self.drones:
-                if not drone.waypoints:
-                    drone.waypoints = list(world_waypoints)
+                if not drone.waypoints and self.world_waypoints:
+                    drone.clear_waypoints()
+                    for wp in self.world_waypoints[:5]:  # Add first 5 waypoints
+                        drone.add_waypoint(wp[0], wp[1])
 
     def update(self, dt):
         self.elapsed += dt
         self.plan_elapsed += dt
         self.tick += 1
         
-        # Update Control Parameters from Global Config (if changed dynamically during runtime)
-        # Assuming cp.PID_KP etc might change if user edits controlPanel live? 
-        # But ordinarily we read once. Let's force update to be safe if user wants real-time tweaking.
         for drone in self.drones:
             drone.set_pid_params(cp.PID_KP, cp.PID_KI, cp.PID_KD)
         
-        # Track explored path history (lead drone position)
-        if self.drones:
-            lead = max(self.drones, key=lambda d: d.pos[0])  # rightmost drone
-            pos = (lead.pos[0], lead.pos[1])
-            # Only add if moved enough (avoid too many points)
-            if not self.explored_history or distance(self.explored_history[-1], pos) > 1.0:
-                self.explored_history.append(pos)
-        
-        # Path Planning (receding horizon)
+        # Replan periodically
         if self.plan_elapsed >= self.plan_interval:
             self.plan_elapsed = 0.0
             self.plan_paths()
         
-        # Physics Update
+        # Physics + sensing
         for drone in self.drones:
             drone.update_physics(dt)
-            
-            # Sensing
             for mine in self.mines_truth:
-                d = distance(drone.pos, (mine[0], mine[1]))
-                if d < cp.DETECTION_RADIUS_FT:
+                if distance(drone.pos, mine) < cp.DETECTION_RADIUS_FT:
                     if mine not in self.mines_detected:
                         self.mines_detected.append(mine)
 
@@ -429,32 +346,62 @@ class DroneHandler:
             my = oy + (m[1] * cp.PX_PER_FOOT)
             pygame.draw.circle(surface, cp.Endesga.network_red, (int(mx), int(my)), 2)
 
-        # Drones
+        # ===== Draw Planned Path (skip unexplored start, show future planning) =====
+        if len(self.world_waypoints) > 1 and self.drones:
+            belief_grid = self.get_belief_grid()
+            num_rows = len(belief_grid)
+            num_cols = len(belief_grid[0]) if belief_grid else 0
+            
+            # Find the leftmost explored X position
+            min_explored_x = float('inf')
+            for r in range(num_rows):
+                for c in range(num_cols):
+                    if belief_grid[r][c] >= 0:  # Explored cell
+                        cell_x = c * 2 + 1
+                        if cell_x < min_explored_x:
+                            min_explored_x = cell_x
+            
+            # Find the furthest drone X position
+            max_drone_x = max(d.pos[0] for d in self.drones)
+            
+            # Draw waypoints from explored area up to current frontier
+            explored_waypoints = []
+            for wx, wy in self.world_waypoints:
+                # Skip waypoints before the explored region
+                if wx < min_explored_x - 5:
+                    continue
+                # Show waypoints only up to where drones have reached (small buffer)
+                if wx <= max_drone_x + 5:  # Just 5ft buffer ahead
+                    explored_waypoints.append((wx, wy))
+                else:
+                    break
+            
+            if len(explored_waypoints) > 1:
+                screen_points = []
+                for wx, wy in explored_waypoints:
+                    sx = ox + (wx * cp.PX_PER_FOOT)
+                    sy = oy + (wy * cp.PX_PER_FOOT)
+                    screen_points.append((sx, sy))
+
+                # Draw semi-transparent corridor width
+                width_cells = (self.current_corridor_width * 2) + 1
+                width_px = max(1, int(width_cells * cp.PX_PER_FOOT))
+
+                path_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+                pygame.draw.lines(path_surface, (50, 200, 100, 80), False, screen_points, width_px)
+                surface.blit(path_surface, (0, 0))
+
+                # Draw solid green centerline
+                pygame.draw.lines(surface, cp.Endesga.network_green, False, screen_points, 3)
+
+                # Draw waypoint markers
+                for i, pt in enumerate(screen_points):
+                    if i % 5 == 0:  # Every 5th point
+                        pygame.draw.circle(surface, cp.Endesga.network_green, (int(pt[0]), int(pt[1])), 3)
+
+        # Drones on top (drawn last so they're visible)
         for d in self.drones:
             d.draw(surface, (ox, oy))
-
-        # Explored path visualization: actual path traced from start (purple)
-        if len(self.explored_history) > 1:
-            explored_points = []
-            for wx, wy in self.explored_history:
-                sx = ox + (wx * cp.PX_PER_FOOT)
-                sy = oy + (wy * cp.PX_PER_FOOT)
-                explored_points.append((sx, sy))
-            width_cells = 1 + 2 * max(0, self.corridor_width)
-            width_px = max(1, int(width_cells * 2 * cp.PX_PER_FOOT))
-            pygame.draw.lines(surface, cp.Endesga.sebastian_lague_light_purple, False, explored_points, width_px)
-
-        # Historical best path (thicker, different color)
-        if self.best_valid_world_waypoints:
-            points = []
-            for wx, wy in self.best_valid_world_waypoints:
-                sx = ox + (wx * cp.PX_PER_FOOT)
-                sy = oy + (wy * cp.PX_PER_FOOT)
-                points.append((sx, sy))
-            if len(points) > 1:
-                width_cells = 1 + 2 * max(0, self.best_valid_corridor_width)
-                width_px = max(1, int(width_cells * 2 * cp.PX_PER_FOOT))
-                pygame.draw.lines(surface, cp.Endesga.network_green, False, points, width_px)
 
     def _ensure_4_connected(self, path):
         if not path:

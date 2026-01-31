@@ -9,7 +9,7 @@ BACKGROUND_COLOR = (20, 25, 30)
 # --- Physics & Rules ---
 NUM_DRONES = 4
 DRONE_RADIUS_FT = 0.5        # Physical collision radius
-DETECTION_RADIUS_FT = 5.0   # Sensing radius
+DETECTION_RADIUS_FT = 2.0   # Sensing radius
 MAX_SPEED_FT = 12.0          # ft/s
 MAX_ACCEL_FT = 20.0          # ft/s^2 (Approx 2 seconds to max speed if 6, let's make it snappy)
 TURN_RATE_RAD = 3.0          # rad/s
