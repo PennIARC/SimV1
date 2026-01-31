@@ -246,7 +246,7 @@ while running:
     waypoints = None
     result = None
     if planning_enabled:
-        confidence_map, clearance_map, mines_detected_high, mines_detected_low = drone_handler.get_confidence_and_clearance_maps()
+        confidence_map, clearance_map, mines_detected_high, mines_detected_low = drone_handler.get_maps()
         result = planner.plan(confidence_map, clearance_map)
 
         # Update cached live path: only replace when planner returns a valid path
@@ -265,20 +265,16 @@ while running:
             planning_enabled = False
             freeze_until = time.time() + 3.0
 
-        # produce waypoints only while planning enabled
-        if planning_enabled and result and result.get('path'):
+        # produce waypoints for drones based on planned path
+        if result and result.get('path'):
             waypoints = planner.suggest_exploration_targets(
-                result['path'], confidence_map, clearance_map, mines_detected_high, 
-                cp.HIGH_ADVANCE_STEPS, sensing_radius_low=cp.DETECTION_RADIUS_FT_SMALL)
-        else:
-            waypoints = planner.fixed_targets(num_drones=len(drone_handler.drones))
-
-        # physics update only while planning enabled
-        if planning_enabled:
-            drone_handler.update(dt, waypoints)
+                result['path'], confidence_map, clearance_map, mines_detected_high,
+                sensing_radius_low=cp.DETECTION_RADIUS_FT_SMALL)
     else:
-        # planning disabled: don't update physics so the scene appears frozen
-        pass
+        waypoints = planner.fixed_targets(num_drones=len(drone_handler.drones))
+        
+    # physics update
+    drone_handler.update(dt, waypoints)
 
     # Update Heatmap if needed (Static map, so only on regen)
     if heatmap_needs_update:
@@ -325,7 +321,6 @@ while running:
 
     # 2.a Draw planner paths: persistent (saved) and live (current) if available
     live_path = None
-    persistent = None
     persistent = None
     if result and isinstance(result, dict):
         persistent = result.get("persistent_path") if "persistent_path" in result else getattr(planner, "persistent_best", None)

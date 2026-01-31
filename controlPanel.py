@@ -14,8 +14,6 @@ DETECTION_RADIUS_FT_SMALL = 5.0   # Sensing radius
 MAX_SPEED_FT = 24.0          # ft/s (increased for faster motion)
 MAX_ACCEL_FT = 40.0          # ft/s^2 (increased to allow faster accel)
 TURN_RATE_RAD = 3.0          # rad/s
-# High-alt UAV advance per timestep (columns)
-HIGH_ADVANCE_STEPS = 5
 
 # --- PID Control ---
 PID_KP = 3.5

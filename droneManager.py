@@ -423,7 +423,7 @@ class DroneHandler:
 
         return confidence_map, clearance_map, self.mines_detected_high, self.mines_detected_low
 
-    def get_confidence_and_clearance_maps(self):
+    def get_maps(self):
         """
         Returns (confidence_map, clearance_map).
         Computes them if not already available.
