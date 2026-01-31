@@ -3,32 +3,38 @@ import pygame
 # --- Simulation Configuration ---
 PX_PER_FOOT = 5.0            # Visual scale
 ARENA_WIDTH_FT = 100.0
-ARENA_HEIGHT_FT = 30.0
+ARENA_HEIGHT_FT = 60.0
 BACKGROUND_COLOR = (20, 25, 30)
 
 # --- Physics & Rules ---
 NUM_DRONES = 4
 DRONE_RADIUS_FT = 0.5        # Physical collision radius
-DETECTION_RADIUS_FT = 5.0   # Sensing radius
-MAX_SPEED_FT = 12.0          # ft/s
-MAX_ACCEL_FT = 20.0          # ft/s^2 (Approx 2 seconds to max speed if 6, let's make it snappy)
+DETECTION_RADIUS_FT_LARGE = 20.0   # Sensing radius
+DETECTION_RADIUS_FT_SMALL = 5.0   # Sensing radius
+MAX_SPEED_FT = 24.0          # ft/s (increased for faster motion)
+MAX_ACCEL_FT = 40.0          # ft/s^2 (increased to allow faster accel)
 TURN_RATE_RAD = 3.0          # rad/s
+# High-alt UAV advance per timestep (columns)
+HIGH_ADVANCE_STEPS = 5
 
 # --- PID Control ---
-PID_KP = 2.0
+PID_KP = 3.5
 PID_KI = 0.0
-PID_KD = 0.5
+PID_KD = 1.0
 TICK_RATE = 1/60.0
 
 # --- Map Generation ---
-MINE_COUNT_MIN = 10
-MINE_COUNT_MAX = 50
+MINE_COUNT_MIN = 80
+MINE_COUNT_MAX = 100
 MINE_RADIUS_FT = 0.5
 SAFE_DIST_FT = 1.0
 
 # --- Visuals ---
 VISUAL_DRONE_SIZE = 1.0      # Scale factor for drone drawing
 GRID_LINE_SPACING = 50       # Feet
+
+# Rendering toggles for performance testing
+RENDER_CONFIDENCE = False
 
 
 

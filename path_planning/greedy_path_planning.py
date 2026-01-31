@@ -10,6 +10,7 @@ from typing import List, Tuple, Optional, Dict
 
 # Minimum required clearance (ft) for a cell to be considered traversable
 CLEARANCE_THRESHOLD = 1.0
+CONFIDENCE_THRESHOLD = 0.5
 
 
 class GreedyBottleneckPlanner:
@@ -83,7 +84,7 @@ class GreedyBottleneckPlanner:
 
         # Seed from start cells
         for sx, sy in self.start_cells:
-            if confidence_map[sy][sx] <= 0:
+            if confidence_map[sy][sx] <= CONFIDENCE_THRESHOLD:
                 continue
             if clearance_map[sy][sx] <= CLEARANCE_THRESHOLD:
                 continue
@@ -101,7 +102,7 @@ class GreedyBottleneckPlanner:
                             nx, ny = sx + dx, sy + dy
                             if not self.in_bounds(nx, ny):
                                 continue
-                            if confidence_map[ny][nx] <= 0:
+                            if confidence_map[ny][nx] <= CONFIDENCE_THRESHOLD:
                                 continue
                             if clearance_map[ny][nx] <= CLEARANCE_THRESHOLD:
                                 continue
@@ -121,7 +122,7 @@ class GreedyBottleneckPlanner:
             seed_cols = min(6, self.width)
             for y in range(self.height):
                 for x in range(seed_cols):
-                    if confidence_map[y][x] <= 0:
+                    if confidence_map[y][x] <= CONFIDENCE_THRESHOLD:
                         continue
                     if clearance_map[y][x] <= CLEARANCE_THRESHOLD:
                         continue
@@ -144,7 +145,7 @@ class GreedyBottleneckPlanner:
                 return {"path": path, "bottleneck": int(cw), "length": len(path), "reached": True}
 
             for nx, ny in self.neighbors(cx, cy):
-                if confidence_map[ny][nx] <= 0:
+                if confidence_map[ny][nx] <= CONFIDENCE_THRESHOLD:
                     continue
                 if clearance_map[ny][nx] <= CLEARANCE_THRESHOLD:
                     continue
@@ -213,54 +214,307 @@ class GreedyBottleneckPlanner:
     def suggest_exploration_targets(
         self,
         path: List[Tuple[int, int]],
-        confidence_map: List[List[bool]],
-        num_drones: int = 4,
-        radius: int = 5,
+        confidence_map: List[List[float]],
+        clearance_map: List[List[float]],
+        mines_detected_high: List[Tuple[int, int]],
+        high_advance_steps: int = 3,
+        sensing_radius_high: int = 3,
+        sensing_radius_low: int = 1,
     ) -> List[Tuple[int, int]]:
-        active_path = path
-        if self.persistent_best is not None:
-            if path is None or len(self.persistent_best) > len(path):
-                active_path = self.persistent_best
-        elif path is None or len(path) == 0:
-            if self.persistent_best is None:
-                return [None] * num_drones
-            active_path = self.persistent_best
+        """
+        Suggest 4 deterministic exploration targets for the four UAVs.
 
-        candidates = []
+        Order: [UAV0, UAV1, UAV2, UAV3]
+        - UAV0/UAV1: high-alt scanners (upper / lower halves). Advance one column
+          toward the goal-side each timestep.
+        - UAV2/UAV3: low-alt inspectors around a path anchor chosen near the
+          goal that prefer low mine-density and high clearance.
 
-        best_idx = 0
-        best_dist = math.inf
-        for i, (px, py) in enumerate(active_path):
-            d = self.heuristic_distance_to_goal(px, py)
-            if d < best_dist:
-                best_dist = d
-                best_idx = i
+        Deterministic, grid-aligned, and avoids assigning duplicate points.
+        """
+        NUM_DRONES = 4
 
-        cx, cy = active_path[best_idx]
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                nx, ny = cx + dx, cy + dy
-                if not self.in_bounds(nx, ny):
-                    continue
-                if confidence_map[ny][nx]:
-                    continue
-                candidates.append((nx, ny))
+        # Basic map geometry
+        H = len(clearance_map)
+        W = len(clearance_map[0]) if H > 0 else 0
 
-        def score(cell):
-            x, y = cell
-            return abs(x - cx) + abs(y - cy)
+        def in_bounds(x: int, y: int) -> bool:
+            return 0 <= x < W and 0 <= y < H
 
-        candidates = sorted(set(candidates), key=score)
+        def is_safe(x: int, y: int) -> bool:
+            return in_bounds(x, y) and (clearance_map[y][x] > 0)
 
-        if candidates:
-            target = candidates[0]
+        # Deterministic 1D offsets: 0, +1, -1, +2, -2, ...
+        def offsets_1d(max_off: int):
+            out = [0]
+            for d in range(1, max_off + 1):
+                out.append(d)
+                out.append(-d)
+            return out
+
+        # Estimate mine density (count within Euclidean radius)
+        def estimate_mine_density(x: int, y: int, radius: int) -> int:
+            r2 = radius * radius
+            cnt = 0
+            for mx, my in mines_detected_high:
+                dx = mx - x
+                dy = my - y
+                if dx * dx + dy * dy <= r2:
+                    cnt += 1
+            return cnt
+
+        # Handle empty/invalid map
+        if H == 0 or W == 0:
+            return [(0, 0)] * NUM_DRONES
+
+        # Determine anchor on path: prefer point closest to goal (via heuristic)
+        if path:
+            best_idx = 0
+            best_dist = math.inf
+            for i, (px, py) in enumerate(path):
+                d = self.heuristic_distance_to_goal(px, py)
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = i
+            anchor_x, anchor_y = path[best_idx]
         else:
-            mid_idx = max(1, min(len(active_path) - 1, best_idx))
-            target = active_path[mid_idx]
+            # fallback to persistent best if present, else map center
+            if self.persistent_best:
+                pb = self.persistent_best
+                anchor_x, anchor_y = pb[-1]
+            else:
+                anchor_x, anchor_y = (W // 2, H // 2)
 
-        waypoints = [None] * num_drones
-        waypoints[0] = target
-        return waypoints
+        # Determine goal-side direction using goal_cells: move one column toward
+        # the average goal x (deterministic). If no goal info, advance right.
+        if self.goal_cells:
+            goal_x = sum(gx for gx, _ in self.goal_cells) / max(1, len(self.goal_cells))
+        else:
+            goal_x = W - 1
+
+        # Advance toward goal-side by configurable number of columns per timestep
+        if goal_x > anchor_x:
+            next_x = min(W - 1, anchor_x + max(1, high_advance_steps))
+        elif goal_x < anchor_x:
+            next_x = max(0, anchor_x - max(1, high_advance_steps))
+        else:
+            next_x = anchor_x
+
+        # High-alt UAVs: UAV0 scans upper half, UAV1 scans lower half.
+        mid = H // 2
+
+        def find_safe_in_column(col_x: int, y_min: int, y_max: int):
+            # Prefer rows near band center, deterministic offsets
+            band_center = (y_min + y_max) // 2
+            vert_offs = offsets_1d(max(1, (y_max - y_min) // 2 + 2))
+            horiz_offs = offsets_1d(min(6, W - 1))
+            # try exact column first then nearby columns deterministically
+            for dx in horiz_offs:
+                cx = col_x + dx
+                if cx < 0 or cx >= W:
+                    continue
+                for oy in vert_offs:
+                    cy = band_center + oy
+                    if cy < y_min or cy > y_max:
+                        continue
+                    if is_safe(cx, cy):
+                        return (cx, cy)
+            return None
+
+        u0 = find_safe_in_column(next_x, 0, max(0, mid - 1))
+        u1 = find_safe_in_column(next_x, mid, H - 1)
+        
+        # u0 = (next_x, (mid - 1)//2)
+        # u1 = (next_x, mid + (H - 1 - mid)//2)
+
+        # If either not found, expand search deterministically across columns
+        if u0 is None:
+            for dx in offsets_1d(W - 1):
+                cx = min(W - 1, max(0, next_x + dx))
+                for y in range(0, max(0, mid)):
+                    if is_safe(cx, y):
+                        u0 = (cx, y)
+                        break
+                if u0:
+                    break
+
+        if u1 is None:
+            for dx in offsets_1d(W - 1):
+                cx = min(W - 1, max(0, next_x + dx))
+                for y in range(mid, H):
+                    if is_safe(cx, y):
+                        u1 = (cx, y)
+                        break
+                if u1:
+                    break
+
+        # As last-resort placeholders (in-bounds) if still None
+        if u0 is None:
+            u0 = (min(W - 1, next_x), max(0, (0 + max(0, mid - 1)) // 2))
+        if u1 is None:
+            u1 = (min(W - 1, next_x), min(H - 1, mid + max(0, (H - 1 - mid) // 2)))
+
+        # choose a deterministic reference point for tie-breaking that is NOT the planner path
+        if mines_detected_high:
+            avg_x = sum(mx for mx, _ in mines_detected_high) / len(mines_detected_high)
+            avg_y = sum(my for _, my in mines_detected_high) / len(mines_detected_high)
+            ref_x, ref_y = int(round(avg_x)), int(round(avg_y))
+        else:
+            ref_x, ref_y = W // 2, H // 2
+
+        # Low-alt UAVs: select targets based ONLY on high-alt detections
+        # Prefer cells that have been seen by high-alt (confidence >= 0.5),
+        # with low estimated mine density (w.r.t. high-alt detections) and high clearance.
+        candidates = []
+        # Precompute distance-to-path for each candidate (if path available)
+        def dist_to_path(px, py):
+            if not path:
+                return abs(px - anchor_x) + abs(py - anchor_y)
+            best = math.inf
+            for (axp, ayp) in path:
+                d = abs(px - axp) + abs(py - ayp)
+                if d < best:
+                    best = d
+            return best
+
+        for cy in range(H):
+            for cx in range(W):
+                # only consider cells observed by high-alt (confidence >= 0.5)
+                if confidence_map[cy][cx] < 0.5:
+                    continue
+                if clearance_map[cy][cx] <= 0:
+                    continue
+                if (cx, cy) == u0 or (cx, cy) == u1:
+                    continue
+                density = estimate_mine_density(cx, cy, sensing_radius_low)
+                # distance to goal (use planner heuristic)
+                dist_goal = self.heuristic_distance_to_goal(cx, cy)
+                # distance to current greedy path (Manhattan)
+                dist_path = dist_to_path(cx, cy)
+                # prefer lower density, then closer to goal, then closer to path, then higher clearance
+                clearance = clearance_map[cy][cx]
+                key = (density, dist_goal, dist_path, -clearance, cx, cy)
+                candidates.append((key, (cx, cy)))
+
+        # If no candidates from high-alt observations, fall back to any scanned cells
+        if not candidates:
+            for cy in range(H):
+                for cx in range(W):
+                    if clearance_map[cy][cx] <= 0:
+                        continue
+                    if (cx, cy) == u0 or (cx, cy) == u1:
+                        continue
+                    density = estimate_mine_density(cx, cy, sensing_radius_low)
+                    clearance = clearance_map[cy][cx]
+                    manh = abs(cx - ref_x) + abs(cy - ref_y)
+                    key = (density, -clearance, manh, cx, cy)
+                    candidates.append((key, (cx, cy)))
+                    dist_goal = self.heuristic_distance_to_goal(cx, cy)
+                    dist_path = dist_to_path(cx, cy)
+                    clearance = clearance_map[cy][cx]
+                    key = (density, dist_goal, dist_path, -clearance, cx, cy)
+                    candidates.append((key, (cx, cy)))
+
+        candidates.sort(key=lambda t: t[0])
+
+        # ref_x, ref_y already computed above
+
+        # Enforce same-x between low-alt UAVs and minimum y-spacing.
+        min_spacing = int(max(1, round(sensing_radius_low * 2 - 1)))
+
+        def find_vertical_at_column(x_col, avoid_set, prefer_y=None, require_spacing=None):
+            base_y = prefer_y if prefer_y is not None else anchor_y
+            for oy in offsets_1d(max(H, (require_spacing or min_spacing) + 2)):
+                ty = base_y + oy
+                if not in_bounds(x_col, ty):
+                    continue
+                if clearance_map[ty][x_col] <= 0:
+                    continue
+                if (x_col, ty) in avoid_set:
+                    continue
+                # check spacing to points in avoid_set that are low-alt (only y spacing)
+                ok = True
+                for ax, ay in avoid_set:
+                    if abs(ty - ay) < (require_spacing or min_spacing):
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                return (x_col, ty)
+            return None
+
+        u2 = None
+        u3 = None
+        used = {u0, u1}
+        # First pass: pick u2 as first candidate, try to pick u3 with same x and sufficient spacing
+        for _, (cx, cy) in candidates:
+            if u2 is None:
+                u2 = (cx, cy)
+                used.add(u2)
+                continue
+            # try to pick u3 with same x and spacing
+            if u3 is None and cx == u2[0] and abs(cy - u2[1]) >= min_spacing:
+                u3 = (cx, cy)
+                used.add(u3)
+                break
+
+        # If u2 found but no same-x partner yet, search vertically in that column
+        if u2 is not None and u3 is None:
+            partner = find_vertical_at_column(u2[0], {u0, u1, u2}, prefer_y=u2[1], require_spacing=min_spacing)
+            if partner is not None:
+                u3 = partner
+                used.add(u3)
+
+
+        # Fill missing low-alt UAVs deterministically near the high-alt observed region
+        def fill_nearby(used_set):
+            for d in range(0, max(W, H)):
+                for ox in offsets_1d(d):
+                    for oy in offsets_1d(d):
+                        x = ref_x + ox
+                        y = ref_y + oy
+                        if not in_bounds(x, y):
+                            continue
+                        if clearance_map[y][x] <= 0:
+                            continue
+                        if (x, y) in used_set:
+                            continue
+                        used_set.add((x, y))
+                        return (x, y)
+            # last resort: anchor or map-center
+            if is_safe(anchor_x, anchor_y) and (anchor_x, anchor_y) not in used_set:
+                used_set.add((anchor_x, anchor_y))
+                return (anchor_x, anchor_y)
+            cx = W // 2
+            cy = H // 2
+            used_set.add((cx, cy))
+            return (cx, cy)
+
+        if u2 is None:
+            u2 = fill_nearby(used)
+        if u3 is None:
+            u3 = fill_nearby(used)
+
+        # Ensure all waypoints distinct; if collision, fix deterministically
+        waypoints = [u0, u1, u2, u3]
+        seen = set()
+        for i, wp in enumerate(waypoints):
+            if wp in seen:
+                # replace with a nearby free cell
+                replacement = fill_nearby(seen)
+                waypoints[i] = replacement
+                seen.add(replacement)
+            else:
+                seen.add(wp)
+
+        # Final clamp to int and in-bounds
+        final = []
+        for x, y in waypoints:
+            ix = int(min(max(0, x), W - 1))
+            iy = int(min(max(0, y), H - 1))
+            final.append((ix, iy))
+
+        return final
 
     def fixed_targets(self, num_drones: int) -> List[Tuple[int, int]]:
         """Return `num_drones` targets evenly spaced along the height,

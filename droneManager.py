@@ -143,8 +143,9 @@ class Drone:
         sy = (self.pos[1] * cp.PX_PER_FOOT) + arena_offset[1]
         
         # Draw Detection Radius
+        detect_radius = cp.DETECTION_RADIUS_FT_LARGE if self.id < 2 else cp.DETECTION_RADIUS_FT_SMALL
         pygame.draw.circle(surface, cp.Endesga.sebastian_lague_light_purple,
-                           (int(sx), int(sy)), int(cp.DETECTION_RADIUS_FT * cp.PX_PER_FOOT), 1)
+                   (int(sx), int(sy)), int(detect_radius * cp.PX_PER_FOOT), 1)
 
         # Draw Drone Shape
         size = cp.VISUAL_DRONE_SIZE * cp.PX_PER_FOOT
@@ -169,19 +170,55 @@ class DroneHandler:
         self.drones = []
         self.mines_truth = []
         self.mines_detected = []
+        # Separate detections by altitude group
+        self.mines_detected_high = []
+        self.mines_detected_low = []
         self.trees = []
         self.safe_path = []
         self.clearance_map = None
         self.confidence_map = None
         self.safe_truth = []
         self.safe_detected = []
+        self.safe_detected_high = []
+        self.safe_detected_low = []
         self.elapsed = 0.0
 
-        # Initialize drones evenly along the left (start) edge using arena height
-        if cp.NUM_DRONES == 1:
-            start_ys = [cp.ARENA_HEIGHT_FT / 2.0]
+        # Initialize drones along the left (start) edge.
+        # High-alt UAVs (id 0 and 1) are placed with spacing 1/3 of arena height:
+        # y = H/3 and y = 2H/3. Remaining drones keep a deterministic fallback spacing.
+        H = cp.ARENA_HEIGHT_FT
+        N = cp.NUM_DRONES
+        start_ys = []
+        if N <= 0:
+            start_ys = []
+        elif N == 1:
+            start_ys = [H / 2.0]
         else:
-            start_ys = [i * (cp.ARENA_HEIGHT_FT) / (cp.NUM_DRONES - 1) for i in range(cp.NUM_DRONES)]
+            for i in range(N):
+                if i == 0:
+                    y = H / 3.0
+                elif i == 1:
+                    y = 2.0 * H / 3.0
+                else:
+                    # low-alt UAVs start at the center of the start boundary
+                    y = H / 2.0
+                start_ys.append(float(y))
+
+        # Avoid exact duplicate y positions for the high-alt UAVs only (keep low-alt at center)
+        seen = []
+        for idx, y in enumerate(start_ys):
+            ny = y
+            # Only nudge for high-alt UAVs (id 0 and 1)
+            if idx < 2:
+                attempt = 0
+                while any(abs(ny - s) < 1e-6 for s in seen) and attempt < 5:
+                    if attempt % 2 == 0:
+                        ny = min(H, ny + 1.0)
+                    else:
+                        ny = max(0.0, ny - 1.0)
+                    attempt += 1
+            seen.append(ny)
+            start_ys[idx] = ny
 
         for i, y in enumerate(start_ys):
             # place at leftmost column (x=0.0)
@@ -193,8 +230,12 @@ class DroneHandler:
         self.trees = []
         self.mines_truth = []
         self.mines_detected = []
+        self.mines_detected_high = []
+        self.mines_detected_low = []
         self.safe_truth = []
         self.safe_detected = []
+        self.safe_detected_high = []
+        self.safe_detected_low = []
         self.elapsed = 0.0
         
         # Mines (copied logic)
@@ -279,16 +320,29 @@ class DroneHandler:
         for drone in self.drones:
             drone.update_physics(dt)
 
-            # Sensing
+            # Sensing — use large radius for high-alt (drone.id 0/1), small for low-alt
+            detect_radius = cp.DETECTION_RADIUS_FT_LARGE if drone.id < 2 else cp.DETECTION_RADIUS_FT_SMALL
             for mine in self.mines_truth:
                 d = distance(drone.pos, (mine[0], mine[1]))
-                if d < cp.DETECTION_RADIUS_FT:
+                if d < detect_radius:
+                    if drone.id < 2:
+                        if mine not in self.mines_detected_high:
+                            self.mines_detected_high.append(mine)
+                    else:
+                        if mine not in self.mines_detected_low:
+                            self.mines_detected_low.append(mine)
                     if mine not in self.mines_detected:
                         self.mines_detected.append(mine)
-            
+
             for safe in self.safe_truth:
                 d = distance(drone.pos, (safe[0], safe[1]))
-                if d < cp.DETECTION_RADIUS_FT:
+                if d < detect_radius:
+                    if drone.id < 2:
+                        if safe not in self.safe_detected_high:
+                            self.safe_detected_high.append(safe)
+                    else:
+                        if safe not in self.safe_detected_low:
+                            self.safe_detected_low.append(safe)
                     if safe not in self.safe_detected:
                         self.safe_detected.append(safe)
 
@@ -309,39 +363,65 @@ class DroneHandler:
         h = int(cp.ARENA_HEIGHT_FT) + 1
 
         clearance_map = np.full((h, w), -1.0, dtype=np.float32)
-        # confidence_map = np.full((h, w), 1.0, dtype=np.float32)
+        # confidence semantics:
+        # 0.0 = unknown, 0.5 = seen by high-alt only, 1.0 = confirmed by low-alt
         confidence_map = np.zeros((h, w), dtype=np.float32)
 
-        # Mark detected mines
-        for mx, my in self.mines_detected:
+        # Mark high-alt detected mines (lower confidence)
+        for mx, my in self.mines_detected_high:
+            ix = int(round(mx))
+            iy = int(round(my))
+            if 0 <= ix < w and 0 <= iy < h:
+                clearance_map[iy, ix] = 0.0
+                confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
+
+        # Mark low-alt detected mines (confirmed)
+        for mx, my in self.mines_detected_low:
             ix = int(round(mx))
             iy = int(round(my))
             if 0 <= ix < w and 0 <= iy < h:
                 clearance_map[iy, ix] = 0.0
                 confidence_map[iy, ix] = 1.0
 
-        # Mark scanned areas
+        # Mark scanned areas from high-alt and low-alt separately
         max_clear = float(w + h)
-        for sx, sy in self.safe_detected:
+        # high-alt scanned cells contribute clearance computed from high-alt detections
+        if len(self.mines_detected_high) > 0:
+            th = np.array(self.mines_detected_high)
+        else:
+            th = None
+
+        if len(self.mines_detected_low) > 0:
+            tl = np.array(self.mines_detected_low)
+        else:
+            tl = None
+
+        for sx, sy in self.safe_detected_high:
             ix = int(round(sx))
             iy = int(round(sy))
             if 0 <= ix < w and 0 <= iy < h:
-                # compute clearance as distance to nearest true mine
-                if len(self.mines_detected) > 0:
-                    tm = np.array(self.mines_detected)
-                    # Euclidean distance to nearest detected mine
-                    distances = np.sqrt((tm[:, 0] - ix) ** 2 + (tm[:, 1] - iy) ** 2)
+                if th is not None:
+                    distances = np.sqrt((th[:, 0] - ix) ** 2 + (th[:, 1] - iy) ** 2)
                     clearance_map[iy, ix] = float(distances.min())
-                    # print(clearance_map[iy, ix])
                 else:
-                    # scanned and no detected mines => very large clearance
+                    clearance_map[iy, ix] = max_clear
+                confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
+
+        for sx, sy in self.safe_detected_low:
+            ix = int(round(sx))
+            iy = int(round(sy))
+            if 0 <= ix < w and 0 <= iy < h:
+                if tl is not None:
+                    distances = np.sqrt((tl[:, 0] - ix) ** 2 + (tl[:, 1] - iy) ** 2)
+                    clearance_map[iy, ix] = float(distances.min())
+                else:
                     clearance_map[iy, ix] = max_clear
                 confidence_map[iy, ix] = 1.0
-                               
+
         self.clearance_map = clearance_map
         self.confidence_map = confidence_map
 
-        return confidence_map, clearance_map
+        return confidence_map, clearance_map, self.mines_detected_high, self.mines_detected_low
 
     def get_confidence_and_clearance_maps(self):
         """
@@ -351,7 +431,7 @@ class DroneHandler:
         if getattr(self, "clearance_map", None) is None or getattr(self, "confidence_map", None) is None:
             return self.compute_clearance_map()
         else:
-            return self.confidence_map, self.clearance_map
+            return self.confidence_map, self.clearance_map, self.mines_detected_high, self.mines_detected_low
     
     def draw(self, surface, offset=(0, 0)):
         ox, oy = offset
@@ -365,6 +445,30 @@ class DroneHandler:
         for x_ft in range(0, int(cp.ARENA_WIDTH_FT) + 1, cp.GRID_LINE_SPACING):
             lx = ox + (x_ft * cp.PX_PER_FOOT)
             pygame.draw.line(surface, cp.Endesga.my_blue, (lx, rect.top), (lx, rect.bottom), 1)
+
+        # Confidence overlay: show cells observed by high-alt (0.5) vs confirmed by low-alt (1.0)
+        if cp.RENDER_CONFIDENCE and getattr(self, "confidence_map", None) is not None:
+            cm = self.confidence_map
+            # cell size in pixels
+            cell_px = int(cp.PX_PER_FOOT)
+            # Colors: high-alt-only (warm), low-alt-confirmed (green)
+            high_only_color = (255, 180, 60)
+            confirmed_color = tuple(cp.Endesga.network_green)
+            h, w = cm.shape
+            for iy in range(h):
+                for ix in range(w):
+                    val = float(cm[iy, ix])
+                    if val >= 1.0:
+                        color = confirmed_color
+                    elif val >= 0.5:
+                        color = high_only_color
+                    else:
+                        continue
+                    # draw a small filled rect representing the cell
+                    rx = ox + ix * cp.PX_PER_FOOT
+                    ry = oy + iy * cp.PX_PER_FOOT
+                    rect = pygame.Rect(int(rx), int(ry), max(1, cell_px), max(1, cell_px))
+                    surface.fill(color, rect)
 
         # Mines
         for m in self.mines_truth:
