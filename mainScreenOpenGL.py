@@ -135,7 +135,7 @@ pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEX
 pygame.display.gl_set_attribute(pygame.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG, True)
 
 # 2. Setup Window
-screen = pygame.display.set_mode((0, 0), pygame.OPENGL | pygame.DOUBLEBUF | pygame.FULLSCREEN)
+screen = pygame.display.set_mode((0, 0), pygame.OPENGL | pygame.DOUBLEBUF)
 info = pygame.display.Info()
 WINDOW_WIDTH, WINDOW_HEIGHT = info.current_w, info.current_h
 

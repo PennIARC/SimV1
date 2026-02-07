@@ -2,15 +2,15 @@ import pygame
 
 # --- Simulation Configuration ---
 PX_PER_FOOT = 5.0            # Visual scale
-ARENA_WIDTH_FT = 100.0
-ARENA_HEIGHT_FT = 60.0
+ARENA_WIDTH_FT = 300.0
+ARENA_HEIGHT_FT = 80.0
 BACKGROUND_COLOR = (20, 25, 30)
 
 # --- Physics & Rules ---
 NUM_DRONES = 4
 DRONE_RADIUS_FT = 0.5        # Physical collision radius
-DETECTION_RADIUS_FT_LARGE = 20.0   # Sensing radius
-DETECTION_RADIUS_FT_SMALL = 5.0   # Sensing radius
+DETECTION_RADIUS_FT_LARGE = 10.0   # Sensing radius
+DETECTION_RADIUS_FT_SMALL = 2.0   # Sensing radius
 MAX_SPEED_FT = 24.0          # ft/s (increased for faster motion)
 MAX_ACCEL_FT = 40.0          # ft/s^2 (increased to allow faster accel)
 TURN_RATE_RAD = 3.0          # rad/s
@@ -22,8 +22,8 @@ PID_KD = 1.0
 TICK_RATE = 1/60.0
 
 # --- Map Generation ---
-MINE_COUNT_MIN = 80
-MINE_COUNT_MAX = 100
+MINE_COUNT_MIN = 200
+MINE_COUNT_MAX = 400
 MINE_RADIUS_FT = 0.5
 SAFE_DIST_FT = 1.0
 
