@@ -226,7 +226,7 @@ class DroneHandler:
             
         self.generate_map()
 
-    def generate_map(self):
+    def generate_map(self, seed=None):
         self.trees = []
         self.mines_truth = []
         self.mines_detected = []
@@ -238,6 +238,11 @@ class DroneHandler:
         self.safe_detected_low = []
         self.elapsed = 0.0
         
+
+        # Use fixed seed if provided, otherwise use controlPanel default
+        actual_seed = seed if seed is not None else cp.MINE_SEED
+        if actual_seed is not None:
+            random.seed(actual_seed)
         # Mines (copied logic)
         count = random.randint(cp.MINE_COUNT_MIN, cp.MINE_COUNT_MAX)
         for _ in range(count):
@@ -245,14 +250,20 @@ class DroneHandler:
             my = random.uniform(1, cp.ARENA_HEIGHT_FT - 1)
             self.mines_truth.append([mx, my])
 
-        # Generate safe_truth as all integer grid cells not occupied by a mine (rounded)
-        w = int(cp.ARENA_WIDTH_FT) + 1
-        h = int(cp.ARENA_HEIGHT_FT) + 1
-        mine_cells = set((int(round(mx)), int(round(my))) for mx, my in self.mines_truth)
-        for ix in range(w):
-            for iy in range(h):
+        # Generate safe_truth on 2ft competition grid (positions stored in feet)
+        cell = int(cp.COMP_CELL_SIZE_FT)
+        comp_w = cp.COMP_FIELD_LENGTH_CELLS  # 150
+        comp_h = cp.COMP_FIELD_WIDTH_CELLS   # 40
+        mine_cells = set()
+        for mx, my in self.mines_truth:
+            gc = min(max(0, int(mx) // cell), comp_w - 1)
+            gr = min(max(0, int(my) // cell), comp_h - 1)
+            mine_cells.add((gc, gr))
+        for ix in range(comp_w):
+            for iy in range(comp_h):
                 if (ix, iy) not in mine_cells:
-                    self.safe_truth.append([float(ix), float(iy)])
+                    # Store as feet (center of 2ft cell)
+                    self.safe_truth.append([float(ix * cell + 1), float(iy * cell + 1)])
 
     def stop_all_drones(self):
         """Immediately stop all drones: clear waypoints, zero velocities/accelerations, reset controllers."""
@@ -351,72 +362,87 @@ class DroneHandler:
 
     def compute_clearance_map(self):
         """
-        Compute and store self.clearance_map, confidence_map.
+        Compute and store self.clearance_map, confidence_map on the 2ft competition grid.
 
-        self.clearance_map with semantics:
+        self.clearance_map with semantics (in grid units, 1 unit = 2ft):
           -1.0 = unknown
            0.0 = mine
-          >0.0 = distance (ft) to nearest detected mine
-        Grid is one cell per foot (0..ARENA_WIDTH_FT, 0..ARENA_HEIGHT_FT).
+          >0.0 = distance (grid units) to nearest detected mine
+        Grid: COMP_FIELD_WIDTH_CELLS × COMP_FIELD_LENGTH_CELLS (40 × 150).
         """
-        w = int(cp.ARENA_WIDTH_FT) + 1
-        h = int(cp.ARENA_HEIGHT_FT) + 1
+        cell = int(cp.COMP_CELL_SIZE_FT)  # 2
+        w = cp.COMP_FIELD_LENGTH_CELLS     # 150 (planner x)
+        h = cp.COMP_FIELD_WIDTH_CELLS      # 40  (planner y)
 
         clearance_map = np.full((h, w), -1.0, dtype=np.float32)
-        # confidence semantics:
-        # 0.0 = unknown, 0.5 = seen by high-alt only, 1.0 = confirmed by low-alt
         confidence_map = np.zeros((h, w), dtype=np.float32)
 
-        # Mark high-alt detected mines (lower confidence)
+        # --- Convert detected mines to 2ft grid and mark ---
+        mine_grid_high = set()
         for mx, my in self.mines_detected_high:
-            ix = int(round(mx))
-            iy = int(round(my))
-            if 0 <= ix < w and 0 <= iy < h:
-                clearance_map[iy, ix] = 0.0
-                confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
+            ix = min(max(0, int(mx) // cell), w - 1)
+            iy = min(max(0, int(my) // cell), h - 1)
+            mine_grid_high.add((ix, iy))
+            clearance_map[iy, ix] = 0.0
+            confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
 
-        # Mark low-alt detected mines (confirmed)
+        mine_grid_low = set()
         for mx, my in self.mines_detected_low:
-            ix = int(round(mx))
-            iy = int(round(my))
-            if 0 <= ix < w and 0 <= iy < h:
-                clearance_map[iy, ix] = 0.0
-                confidence_map[iy, ix] = 1.0
+            ix = min(max(0, int(mx) // cell), w - 1)
+            iy = min(max(0, int(my) // cell), h - 1)
+            mine_grid_low.add((ix, iy))
+            clearance_map[iy, ix] = 0.0
+            confidence_map[iy, ix] = 1.0
 
-        # Mark scanned areas from high-alt and low-alt separately
+        # --- Compute clearance for scanned safe cells ---
         max_clear = float(w + h)
-        # high-alt scanned cells contribute clearance computed from high-alt detections
-        if len(self.mines_detected_high) > 0:
-            th = np.array(self.mines_detected_high)
+
+        # High-alt mine grid positions for distance calc
+        if mine_grid_high:
+            th = np.array(list(mine_grid_high), dtype=np.float32)
         else:
             th = None
 
-        if len(self.mines_detected_low) > 0:
-            tl = np.array(self.mines_detected_low)
+        if mine_grid_low:
+            tl = np.array(list(mine_grid_low), dtype=np.float32)
         else:
             tl = None
 
+        # High-alt safe detections
+        seen_high = set()
         for sx, sy in self.safe_detected_high:
-            ix = int(round(sx))
-            iy = int(round(sy))
-            if 0 <= ix < w and 0 <= iy < h:
-                if th is not None:
-                    distances = np.sqrt((th[:, 0] - ix) ** 2 + (th[:, 1] - iy) ** 2)
-                    clearance_map[iy, ix] = float(distances.min())
-                else:
-                    clearance_map[iy, ix] = max_clear
-                confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
+            ix = min(max(0, int(sx) // cell), w - 1)
+            iy = min(max(0, int(sy) // cell), h - 1)
+            if (ix, iy) in seen_high:
+                continue
+            seen_high.add((ix, iy))
+            if clearance_map[iy, ix] == 0.0:
+                continue  # mine cell, skip
+            if th is not None:
+                distances = np.sqrt((th[:, 0] - ix) ** 2 + (th[:, 1] - iy) ** 2)
+                val = float(distances.min())
+            else:
+                val = max_clear
+            clearance_map[iy, ix] = max(clearance_map[iy, ix], val)
+            confidence_map[iy, ix] = max(confidence_map[iy, ix], 0.5)
 
+        # Low-alt safe detections
+        seen_low = set()
         for sx, sy in self.safe_detected_low:
-            ix = int(round(sx))
-            iy = int(round(sy))
-            if 0 <= ix < w and 0 <= iy < h:
-                if tl is not None:
-                    distances = np.sqrt((tl[:, 0] - ix) ** 2 + (tl[:, 1] - iy) ** 2)
-                    clearance_map[iy, ix] = float(distances.min())
-                else:
-                    clearance_map[iy, ix] = max_clear
-                confidence_map[iy, ix] = 1.0
+            ix = min(max(0, int(sx) // cell), w - 1)
+            iy = min(max(0, int(sy) // cell), h - 1)
+            if (ix, iy) in seen_low:
+                continue
+            seen_low.add((ix, iy))
+            if clearance_map[iy, ix] == 0.0:
+                continue  # mine cell, skip
+            if tl is not None:
+                distances = np.sqrt((tl[:, 0] - ix) ** 2 + (tl[:, 1] - iy) ** 2)
+                val = float(distances.min())
+            else:
+                val = max_clear
+            clearance_map[iy, ix] = max(clearance_map[iy, ix], val)
+            confidence_map[iy, ix] = 1.0
 
         self.clearance_map = clearance_map
         self.confidence_map = confidence_map
@@ -449,9 +475,8 @@ class DroneHandler:
         # Confidence overlay: show cells observed by high-alt (0.5) vs confirmed by low-alt (1.0)
         if cp.RENDER_CONFIDENCE and getattr(self, "confidence_map", None) is not None:
             cm = self.confidence_map
-            # cell size in pixels
-            cell_px = int(cp.PX_PER_FOOT)
-            # Colors: high-alt-only (warm), low-alt-confirmed (green)
+            cell_ft = cp.COMP_CELL_SIZE_FT
+            cell_px = int(cell_ft * cp.PX_PER_FOOT)
             high_only_color = (255, 180, 60)
             confirmed_color = tuple(cp.Endesga.network_green)
             h, w = cm.shape
@@ -464,9 +489,8 @@ class DroneHandler:
                         color = high_only_color
                     else:
                         continue
-                    # draw a small filled rect representing the cell
-                    rx = ox + ix * cp.PX_PER_FOOT
-                    ry = oy + iy * cp.PX_PER_FOOT
+                    rx = ox + ix * cell_ft * cp.PX_PER_FOOT
+                    ry = oy + iy * cell_ft * cp.PX_PER_FOOT
                     rect = pygame.Rect(int(rx), int(ry), max(1, cell_px), max(1, cell_px))
                     surface.fill(color, rect)
 

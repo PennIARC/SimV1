@@ -15,6 +15,7 @@ try:
     import controlPanel as cp
     from droneManager import DroneHandler
     from path_planning.greedy_path_planning import GreedyBottleneckPlanner
+    from scoring import compute_score, format_score
 except ImportError as e:
     print(f"Error: Could not import required modules. {e}")
     sys.exit(1)
@@ -204,14 +205,24 @@ freeze_until = None
 offset_x = (VIRTUAL_W - ARENA_PIXEL_W) // 2
 offset_y = (VIRTUAL_H - ARENA_PIXEL_H) // 2
 
-# Planner Setup
-MAP_HEIGHT = int(cp.ARENA_HEIGHT_FT) + 1
-MAP_WIDTH = int(cp.ARENA_WIDTH_FT) + 1
+# Planner Setup — uses 2ft competition grid
+MAP_WIDTH = cp.COMP_FIELD_LENGTH_CELLS   # 150 (planner x = sim x direction)
+MAP_HEIGHT = cp.COMP_FIELD_WIDTH_CELLS   # 40  (planner y = sim y direction)
+CELL_FT = cp.COMP_CELL_SIZE_FT           # 2.0
 start_cells = [(0, y) for y in range(MAP_HEIGHT)]
 goal_cells = [(MAP_WIDTH - 1, y) for y in range(MAP_HEIGHT)]
-planner = GreedyBottleneckPlanner(
-    MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells
-)
+
+
+##DIFFERENT PLANNER ALGORITHMS
+if cp.PLANNER_ALGORITHM == "greedy":
+    planner = GreedyBottleneckPlanner(
+        MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells
+    )
+# elif cp.PLANNER_ALGORITHM == "rrt":
+#     from path_planning.rrt_planner import RRTPlanner
+#     planner = RRTPlanner(MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells)
+else:
+    raise ValueError(f"Unknown PLANNER_ALGORITHM: {cp.PLANNER_ALGORITHM}")
 
 # Cache the last live path so transient planner failures don't immediately hide the path
 last_live_path = None
@@ -259,19 +270,40 @@ while running:
         # If planner reached goal, stop drones and begin freeze timer (show final frame)
         if result and isinstance(result, dict) and result.get("reached"):
             print("Planner has found a path to the goal!")
-            print("Final Path:", result)
+            path = result["path"]
+            A_min = drone_handler.elapsed / 60.0
+
+            # Score using ground-truth mines (final evaluation)
+            score_truth, G_truth, info_truth = compute_score(
+                path, drone_handler.mines_truth, A_min,
+                grid_w=MAP_WIDTH, grid_h=MAP_HEIGHT, N_oz=cp.WEIGHT_N_OZ)
+            # Score using detected mines (what we knew during planning)
+            score_det, G_det, info_det = compute_score(
+                path, drone_handler.mines_detected, A_min,
+                grid_w=MAP_WIDTH, grid_h=MAP_HEIGHT, N_oz=cp.WEIGHT_N_OZ)
+
+            print(format_score(score_truth, G_truth, info_truth,
+                               algorithm=cp.PLANNER_ALGORITHM, seed=cp.MINE_SEED))
+            print(f"  Bottleneck: {result.get('bottleneck', '?')}")
+            print(f"=== SCORE (detected mines only) ===")
+            print(f"  Score: {score_det:.2f}  |  G={G_det}  B={info_det.get('B', 0)}")
+            print(f"Final Path length: {len(path)} cells")
             print("Simulation complete — freezing 3s then exit.")
             drone_handler.stop_all_drones()
             planning_enabled = False
             freeze_until = time.time() + 3.0
 
-        # produce waypoints for drones based on planned path
+        # produce waypoints for drones based on planned path (in 2ft grid coords)
         if result and result.get('path'):
-            waypoints = planner.suggest_exploration_targets(
+            waypoints_grid = planner.suggest_exploration_targets(
                 result['path'], confidence_map, clearance_map, mines_detected_high,
-                sensing_radius_low=cp.DETECTION_RADIUS_FT_SMALL)
+                sensing_radius_high=int(cp.DETECTION_RADIUS_FT_LARGE / CELL_FT),
+                sensing_radius_low=int(cp.DETECTION_RADIUS_FT_SMALL / CELL_FT))
+            # Convert 2ft grid coords → feet for drone physics
+            waypoints = [(x * CELL_FT, y * CELL_FT) for x, y in waypoints_grid]
     else:
-        waypoints = planner.fixed_targets(num_drones=len(drone_handler.drones))
+        waypoints_grid = planner.fixed_targets(num_drones=len(drone_handler.drones))
+        waypoints = [(x * CELL_FT, y * CELL_FT) for x, y in waypoints_grid]
         
     # physics update
     drone_handler.update(dt, waypoints)
@@ -329,12 +361,12 @@ while running:
         persistent = getattr(planner, "persistent_best", None)
         live_path = last_live_path
 
-    # Helper to convert path cells to screen points
+    # Helper to convert path cells (2ft grid) to screen points
     def to_screen(path):
         pts = []
         for px, py in path:
-            sx = offset_x + (px * cp.PX_PER_FOOT)
-            sy = offset_y + (py * cp.PX_PER_FOOT)
+            sx = offset_x + (px * CELL_FT * cp.PX_PER_FOOT)
+            sy = offset_y + (py * CELL_FT * cp.PX_PER_FOOT)
             pts.append((int(sx), int(sy)))
         return pts
 

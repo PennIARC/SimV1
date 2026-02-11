@@ -8,8 +8,9 @@ import heapq
 import math
 from typing import List, Tuple, Optional, Dict
 
-# Minimum required clearance (ft) for a cell to be considered traversable
-CLEARANCE_THRESHOLD = 1.0
+# Minimum required clearance (grid units) for a cell to be considered traversable.
+# 0.5 allows any non-mine cell (competition rules: can walk adjacent to mines).
+CLEARANCE_THRESHOLD = 0.5
 CONFIDENCE_THRESHOLD = 0.5
 
 
@@ -234,7 +235,9 @@ class GreedyBottleneckPlanner:
         """
         best_bottleneck = [[-math.inf] * self.width for _ in range(self.height)]
         self.parent = [[None] * self.width for _ in range(self.height)]
-        open_set: List[Tuple[float, int, int, int, float]] = []  # (-w, h, x, y, w)
+        # Heap: (heuristic, -bottleneck, x, y, bottleneck)
+        # Primary: closer to goal (shorter path). Secondary: wider corridor.
+        open_set: List[Tuple[float, float, int, int, float]] = []
 
         # Initialize from seeds
         seeds = self._seed_positions(confidence_map, clearance_map)
@@ -247,7 +250,7 @@ class GreedyBottleneckPlanner:
                 continue
             best_bottleneck[y][x] = w0
             self.parent[y][x] = None
-            heapq.heappush(open_set, (-w0, self.heuristic_distance_to_goal(x, y), x, y, w0))
+            heapq.heappush(open_set, (self.heuristic_distance_to_goal(x, y), -w0, x, y, w0))
 
         best_partial: Optional[Tuple[int, int, float]] = None
 
@@ -277,7 +280,7 @@ class GreedyBottleneckPlanner:
 
                 best_bottleneck[ny][nx] = new_w
                 self.parent[ny][nx] = (cx, cy)
-                heapq.heappush(open_set, (-new_w, self.heuristic_distance_to_goal(nx, ny), nx, ny, new_w))
+                heapq.heappush(open_set, (self.heuristic_distance_to_goal(nx, ny), -new_w, nx, ny, new_w))
 
         # No goal, return best partial frontier path
         if best_partial is None:
@@ -294,7 +297,6 @@ class GreedyBottleneckPlanner:
             "reached": False,
             "persistent_path": self.persistent_best,
         }
-        
 
     def suggest_exploration_targets(
         self,

@@ -26,13 +26,20 @@ MINE_COUNT_MIN = 200
 MINE_COUNT_MAX = 400
 MINE_RADIUS_FT = 0.5
 SAFE_DIST_FT = 1.0
-
+MINE_SEED = 42  #FIXED MINE POSITIONS
+PLANNER_ALGORITHM = "greedy"
 # --- Visuals ---
 VISUAL_DRONE_SIZE = 1.0      # Scale factor for drone drawing
 GRID_LINE_SPACING = 50       # Feet
 
 # Rendering toggles for performance testing
 RENDER_CONFIDENCE = False
+
+# --- Competition Scoring (IARC Mission 10) ---
+COMP_CELL_SIZE_FT = 2.0              # Each competition grid square = 2×2 ft
+COMP_FIELD_LENGTH_CELLS = 150        # 300ft / 2ft  (planner x, sim x direction)
+COMP_FIELD_WIDTH_CELLS = 40          # 80ft  / 2ft  (planner y, sim y direction)
+WEIGHT_N_OZ = 0                      # Ounces over 1-lb drone weight limit
 
 
 
