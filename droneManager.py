@@ -1,7 +1,7 @@
 import pygame
 import math
 import random
-from calcs import distance, normalize_angle
+from calcs import distance
 import controlPanel as cp
 import numpy as np
 
@@ -69,6 +69,8 @@ class Drone:
         self.pid_y.reset()
         self.vel = [0.0, 0.0]
         self.acc = [0.0, 0.0]
+    def set_target(self, x, y):
+        self.waypoints = [(float(x), float(y))]
 
     def update_physics(self, dt):
         if not self.active: return
@@ -293,12 +295,12 @@ class DroneHandler:
                     # Only replace the current waypoint if it differs significantly
                     if drone.waypoints:
                         cur_tx, cur_ty = drone.waypoints[0]
-                        if abs(cur_tx - tx) < 1e-3 and abs(cur_ty - ty) < 1e-3:
-                            # same waypoint as already queued: keep existing to avoid resetting PID/vel
+                        if abs(cur_tx - tx) < 5.0 and abs(cur_ty - ty) < 5.0:
                             continue
                     # new/different waypoint: replace queue (this resets PID/vel as intended)
-                    drone.clear_waypoints()
-                    drone.add_waypoint(float(tx), float(ty))
+                    # drone.clear_waypoints()
+                    # drone.add_waypoint(float(tx), float(ty))
+                    drone.set_target(tx, ty)
                 else:
                     if not drone.waypoints:
                         tx = random.uniform(5.0, cp.ARENA_WIDTH_FT)
@@ -494,17 +496,20 @@ class DroneHandler:
                     rect = pygame.Rect(int(rx), int(ry), max(1, cell_px), max(1, cell_px))
                     surface.fill(color, rect)
 
-        # Mines
+        # Mines — snap to centre of 2ft grid cell
+        _ci = int(cp.COMP_CELL_SIZE_FT)               # 2
+        _half_px = (cp.COMP_CELL_SIZE_FT / 2.0) * cp.PX_PER_FOOT
+        _cw = cp.COMP_FIELD_LENGTH_CELLS               # 150
+        _ch = cp.COMP_FIELD_WIDTH_CELLS                 # 40
         for m in self.mines_truth:
+            gx = min(max(0, int(m[0]) // _ci), _cw - 1)
+            gy = min(max(0, int(m[1]) // _ci), _ch - 1)
+            mx = ox + gx * cp.COMP_CELL_SIZE_FT * cp.PX_PER_FOOT + _half_px
+            my = oy + gy * cp.COMP_CELL_SIZE_FT * cp.PX_PER_FOOT + _half_px
             if m not in self.mines_detected:
-                mx = ox + (m[0] * cp.PX_PER_FOOT)
-                my = oy + (m[1] * cp.PX_PER_FOOT)
                 pygame.draw.circle(surface, (40, 45, 55), (int(mx), int(my)), 1)
-                
-        for m in self.mines_detected:
-            mx = ox + (m[0] * cp.PX_PER_FOOT)
-            my = oy + (m[1] * cp.PX_PER_FOOT)
-            pygame.draw.circle(surface, cp.Endesga.network_red, (int(mx), int(my)), 2)
+            else:
+                pygame.draw.circle(surface, cp.Endesga.network_red, (int(mx), int(my)), 2)
 
         # Drones
         for d in self.drones:

@@ -27,7 +27,7 @@ MINE_COUNT_MAX = 400
 MINE_RADIUS_FT = 0.5
 SAFE_DIST_FT = 1.0
 MINE_SEED = 42  #FIXED MINE POSITIONS
-PLANNER_ALGORITHM = "greedy"
+PLANNER_ALGORITHM = "astar"  # "greedy" or "rrt" or "astar"
 # --- Visuals ---
 VISUAL_DRONE_SIZE = 1.0      # Scale factor for drone drawing
 GRID_LINE_SPACING = 50       # Feet

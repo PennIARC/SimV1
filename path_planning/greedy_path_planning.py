@@ -45,8 +45,7 @@ class GreedyBottleneckPlanner:
         self.persistent_best: Optional[List[Tuple[int, int]]] = None
         self.persistent_bottleneck: float = -math.inf
         
-        # exploration scan front (monotonic)
-        self.scan_front_x: int = -1
+
 
     # Grid helpers
     def in_bounds(self, x: int, y: int) -> bool:
@@ -235,9 +234,9 @@ class GreedyBottleneckPlanner:
         """
         best_bottleneck = [[-math.inf] * self.width for _ in range(self.height)]
         self.parent = [[None] * self.width for _ in range(self.height)]
-        # Heap: (heuristic, -bottleneck, x, y, bottleneck)
-        # Primary: closer to goal (shorter path). Secondary: wider corridor.
-        open_set: List[Tuple[float, float, int, int, float]] = []
+        # Heap: (-bottleneck, heuristic, x, y, bottleneck)
+        # Primary: widest corridor (safest path). Secondary: closer to goal.
+        open_set: List[Tuple[float, int, int, int, float]] = []
 
         # Initialize from seeds
         seeds = self._seed_positions(confidence_map, clearance_map)
@@ -250,7 +249,7 @@ class GreedyBottleneckPlanner:
                 continue
             best_bottleneck[y][x] = w0
             self.parent[y][x] = None
-            heapq.heappush(open_set, (self.heuristic_distance_to_goal(x, y), -w0, x, y, w0))
+            heapq.heappush(open_set, (-w0, self.heuristic_distance_to_goal(x, y), x, y, w0))
 
         best_partial: Optional[Tuple[int, int, float]] = None
 
@@ -274,13 +273,13 @@ class GreedyBottleneckPlanner:
                 if not self._is_traversable(nx, ny, confidence_map, clearance_map):
                     continue
 
-                new_w = min(cw, clearance_map[ny][nx])
+                new_w = min(cw, clearance_map[ny][nx] * confidence_map[ny][nx])
                 if new_w <= best_bottleneck[ny][nx]:
                     continue
 
                 best_bottleneck[ny][nx] = new_w
                 self.parent[ny][nx] = (cx, cy)
-                heapq.heappush(open_set, (self.heuristic_distance_to_goal(nx, ny), -new_w, nx, ny, new_w))
+                heapq.heappush(open_set, (-new_w, self.heuristic_distance_to_goal(nx, ny), nx, ny, new_w))
 
         # No goal, return best partial frontier path
         if best_partial is None:
@@ -298,216 +297,8 @@ class GreedyBottleneckPlanner:
             "persistent_path": self.persistent_best,
         }
 
-    def suggest_exploration_targets(
-        self,
-        path: List[Tuple[int, int]],
-        confidence_map: List[List[float]],
-        clearance_map: List[List[float]],
-        mines_detected_high: List[Tuple[int, int]],
-        sensing_radius_high: int = 10,
-        sensing_radius_low: int = 3,
-    ) -> List[Tuple[int, int]]:
-        """
-        Return 4 deterministic waypoints: [UAV0, UAV1, UAV2, UAV3]
-
-        UAV0/UAV1 (high-alt): scan upper/lower halves, advance a persistent scanning front 
-            along width toward goal.
-        UAV2/UAV3 (low-alt): choose informative inspection targets using:
-            low mine density (from high-alt detections) + close to goal + close to path + high clearance.
-        """
-
-        H = len(clearance_map)
-        W = len(clearance_map[0]) if H > 0 else 0
-        if H == 0 or W == 0:
-            return [(0, 0), (0, 0), (0, 0), (0, 0)]
-
-        mine_density_radius = max(1, sensing_radius_high // 2)
-
-        def in_bounds(x: int, y: int) -> bool:
-            return 0 <= x < W and 0 <= y < H
-
-        def safe(x: int, y: int) -> bool:
-            return in_bounds(x, y) and clearance_map[y][x] > CLEARANCE_THRESHOLD
-
-        def offsets_1d(max_off: int):
-            # 0, +1, -1, +2, -2, ...
-            out = [0]
-            for d in range(1, max_off + 1):
-                out.extend([d, -d])
-            return out
-
-        def mine_density(x: int, y: int, r: int) -> int:
-            r2 = r * r
-            return sum(
-                1
-                for mx, my in mines_detected_high
-                if (mx - x) * (mx - x) + (my - y) * (my - y) <= r2
-            )
-
-        # Anchor selection
-        if path:
-            anchor_x, anchor_y = min(path, key=lambda p: self.heuristic_distance_to_goal(p[0], p[1]))
-        elif getattr(self, "persistent_best", None):
-            anchor_x, anchor_y = self.persistent_best[-1]
-        else:
-            anchor_x, anchor_y = (W // 2, H // 2)
-
-        # Goal-side direction & persistent scanning front
-        if getattr(self, "goal_cells", None):
-            goal_x = sum(gx for gx, _ in self.goal_cells) / max(1, len(self.goal_cells))
-        else:
-            goal_x = W - 1
-
-        if goal_x > anchor_x:
-            desired_x = min(W - 1, anchor_x + 1)
-        elif goal_x < anchor_x:
-            desired_x = max(0, anchor_x - 1)
-        else:
-            desired_x = anchor_x
-
-        if self.scan_front_x < 0:
-            self.scan_front_x = desired_x
-        else:
-            self.scan_front_x = max(self.scan_front_x, desired_x)
-
-        scan_x = int(min(max(0, self.scan_front_x), W - 1))
-        mid = H // 2
-
-        # High-alt pick: choose a safe cell near band center around scan_x
-        def pick_scan_point(x0: int, y0: int, y1: int) -> Tuple[int, int]:
-            band_center = (y0 + y1) // 2
-            # search near scan_x first, then nearby columns; near band center first
-            for dx in offsets_1d(min(6, W - 1)):
-                x = x0 + dx
-                if not (0 <= x < W):
-                    continue
-                for dy in offsets_1d(max(1, (y1 - y0) // 2 + 2)):
-                    y = band_center + dy
-                    if y < y0 or y > y1:
-                        continue
-                    if safe(x, y):
-                        return (x, y)
-
-            # fallback: scan wider columns, any safe cell in band
-            for dx in offsets_1d(W - 1):
-                x = min(W - 1, max(0, x0 + dx))
-                for y in range(y0, y1 + 1):
-                    if safe(x, y):
-                        return (x, y)
-
-            # last resort: return an in-bounds placeholder (may be unsafe in extreme cases)
-            return (x0, band_center)
-
-        u0 = pick_scan_point(scan_x, 0, max(0, mid - 1))
-        u1 = pick_scan_point(scan_x, mid, H - 1)
-
-        # Reference point for deterministic fallback fills
-        if mines_detected_high:
-            ref_x = int(round(sum(mx for mx, _ in mines_detected_high) / len(mines_detected_high)))
-            ref_y = int(round(sum(my for _, my in mines_detected_high) / len(mines_detected_high)))
-        else:
-            ref_x, ref_y = (W // 2, H // 2)
-
-        def dist_to_path(x: int, y: int) -> int:
-            if not path:
-                return abs(x - anchor_x) + abs(y - anchor_y)
-            return min(abs(x - px) + abs(y - py) for px, py in path)
-
-        # Low-alt candidates
-        def build_candidates(require_confidence: bool) -> List[Tuple[Tuple, Tuple[int, int]]]:
-            out = []
-            for y in range(H):
-                for x in range(W):
-                    if require_confidence and confidence_map[y][x] < 0.5:
-                        continue
-                    if clearance_map[y][x] <= 0:
-                        continue
-
-                    key = (
-                        mine_density(x, y, mine_density_radius), # lower is better
-                        self.heuristic_distance_to_goal(x, y),   # closer to goal
-                        dist_to_path(x, y),                      # closer to path
-                        -clearance_map[y][x],                    # higher clearance
-                        x, y                                     # deterministic tie-break
-                    )
-                    out.append((key, (x, y)))
-            out.sort(key=lambda t: t[0])
-            return out
-
-        candidates = build_candidates(require_confidence=True)
-        if not candidates:
-            candidates = build_candidates(require_confidence=False)
-
-        # Pick UAV2/UAV3
-        min_spacing = int(max(1, round(sensing_radius_low * 2 - 1)))
-
-        def fill_nearby(used: set) -> Tuple[int, int]:
-            # deterministic expanding ring around ref
-            for d in range(0, max(W, H)):
-                for ox in offsets_1d(d):
-                    for oy in offsets_1d(d):
-                        x, y = ref_x + ox, ref_y + oy
-                        if not in_bounds(x, y):
-                            continue
-                        if clearance_map[y][x] <= 0:
-                            continue
-                        if (x, y) in used:
-                            continue
-                        used.add((x, y))
-                        return (x, y)
-
-            # hard fallback
-            if safe(anchor_x, anchor_y) and (anchor_x, anchor_y) not in used:
-                used.add((anchor_x, anchor_y))
-                return (anchor_x, anchor_y)
-            c = (W // 2, H // 2)
-            used.add(c)
-            return c
-
-        used = set()
-        u2 = u3 = None
-
-        for _, (x, y) in candidates:
-            if u2 is None:
-                u2 = (x, y)
-                used.add(u2)
-                continue
-            if u3 is None and abs(y - u2[1]) >= min_spacing:
-                u3 = (x, y)
-                used.add(u3)
-                break
-
-        if u2 is None:
-            u2 = fill_nearby(used)
-
-        if u3 is None:
-            for _, (x, y) in candidates:
-                if (x, y) != u2 and abs(y - u2[1]) >= min_spacing:
-                    u3 = (x, y)
-                    used.add(u3)
-                    break
-        if u3 is None:
-            u3 = fill_nearby(used)
-
-        if u2 == u3:
-            u3 = fill_nearby({u2})
-
-        # clamp + ensure ints
-        waypoints = [u0, u1, u2, u3]
-        return [(int(min(max(0, x), W - 1)), int(min(max(0, y), H - 1))) for x, y in waypoints]
 
 
-    def fixed_targets(self, num_drones: int) -> List[Tuple[int, int]]:
-        """Return `num_drones` targets evenly spaced along the height,
-        placed at the rightmost column so drones fly left->right.
-        """
-        if num_drones <= 0:
-            return []
 
-        if num_drones == 1:
-            ys = [self.height // 2]
-        else:
-            ys = [int(round(i * (self.height - 1) / (num_drones - 1))) for i in range(num_drones)]
 
-        tx = self.width - 1
-        return [(tx, y) for y in ys]
+    

@@ -1,20 +1,21 @@
 import pygame
 import moderngl
-import struct
 import math
 import time
 import sys
 import array
 import numpy as np
+from path_planning.waypoint_allocator import WaypointAllocator
 
 # Import Framework Utilities
 try:
     from text import drawText
     from fontDict import fonts
-    from calcs import linearGradient, normalize
     import controlPanel as cp
     from droneManager import DroneHandler
     from path_planning.greedy_path_planning import GreedyBottleneckPlanner
+    from path_planning.rrt_planner import RRTPlanner
+    from path_planning.a_star_planner import AStarPlanner
     from scoring import compute_score, format_score
 except ImportError as e:
     print(f"Error: Could not import required modules. {e}")
@@ -34,24 +35,7 @@ def load_shader(ctx, vert_path, frag_path):
         sys.exit(1)
 
 
-# --- HEATMAP CONFIGURATION ---
-# The heatmap covers the specific Arena dimensions
-HEAT_TILE_SIZE = 11  # Size of one heat tile in pixels
-HEAT_TILE_GAP = 1  # Gap between tiles
-HEAT_EFFECTIVE_STEP = HEAT_TILE_SIZE + HEAT_TILE_GAP
 
-# Calculate Grid Dimensions based on Arena Size
-ARENA_PIXEL_W = int(cp.ARENA_WIDTH_FT * cp.PX_PER_FOOT)
-ARENA_PIXEL_H = int(cp.ARENA_HEIGHT_FT * cp.PX_PER_FOOT)
-
-GRID_COLS = ARENA_PIXEL_W // HEAT_EFFECTIVE_STEP
-GRID_ROWS = ARENA_PIXEL_H // HEAT_EFFECTIVE_STEP
-
-# Colors for Heatmap: Red (Close to Mine) -> Green (Safe)
-HEAT_PALETTE = [[200, 40, 80], [40, 100, 120]]
-# Distance (in pixels) at which the heatmap turns fully "Cold" (Green)
-# 50px = 10ft at 5px/ft
-HEAT_MAX_DIST = 50.0
 
 
 def generate_heatmap_surface(mines_truth):
@@ -69,8 +53,8 @@ def generate_heatmap_surface(mines_truth):
 
     # 1. Setup Coordinates
     # Create a meshgrid of tile center coordinates
-    x_coords = np.arange(GRID_COLS) * HEAT_EFFECTIVE_STEP + (HEAT_TILE_SIZE / 2)
-    y_coords = np.arange(GRID_ROWS) * HEAT_EFFECTIVE_STEP + (HEAT_TILE_SIZE / 2)
+    x_coords = np.arange(GRID_COLS) * HEAT_EFFECTIVE_STEP + (HEAT_EFFECTIVE_STEP / 2)
+    y_coords = np.arange(GRID_ROWS) * HEAT_EFFECTIVE_STEP + (HEAT_EFFECTIVE_STEP / 2)
     xv, yv = np.meshgrid(x_coords, y_coords)
 
     # Shape: (Rows * Cols, 2)
@@ -140,6 +124,25 @@ screen = pygame.display.set_mode((0, 0), pygame.OPENGL | pygame.DOUBLEBUF|pygame
 info = pygame.display.Info()
 WINDOW_WIDTH, WINDOW_HEIGHT = info.current_w, info.current_h
 
+# --- Dynamic scale: fit arena as large as possible in the window ---
+_scale_w = (WINDOW_WIDTH * 0.95) / cp.ARENA_WIDTH_FT
+_scale_h = (WINDOW_HEIGHT * 0.88) / cp.ARENA_HEIGHT_FT
+_cell_px = max(4, int(cp.COMP_CELL_SIZE_FT * min(_scale_w, _scale_h)))
+cp.PX_PER_FOOT = _cell_px / cp.COMP_CELL_SIZE_FT
+
+# --- HEATMAP CONFIGURATION ---
+# Grid matches competition rules: 150 x 40 cells, each 2x2 ft
+GRID_COLS = cp.COMP_FIELD_LENGTH_CELLS   # 150
+GRID_ROWS = cp.COMP_FIELD_WIDTH_CELLS    # 40
+HEAT_PALETTE = [[200, 40, 80], [40, 100, 120]]
+
+
+HEAT_TILE_SIZE = _cell_px - 1        # 1px gap for visible grid lines
+HEAT_EFFECTIVE_STEP = _cell_px
+ARENA_PIXEL_W = GRID_COLS * _cell_px
+ARENA_PIXEL_H = GRID_ROWS * _cell_px
+HEAT_MAX_DIST = 10.0 * cp.PX_PER_FOOT
+
 # 3. Create ModernGL Context
 try:
     ctx = moderngl.create_context(require=330)
@@ -189,7 +192,6 @@ except KeyError:
 
 # --- SIMULATION STATE ---
 drone_handler = DroneHandler()
-timer = 0
 toggle = True
 running = True
 last_time = time.time()
@@ -206,23 +208,29 @@ offset_x = (VIRTUAL_W - ARENA_PIXEL_W) // 2
 offset_y = (VIRTUAL_H - ARENA_PIXEL_H) // 2
 
 # Planner Setup — uses 2ft competition grid
-MAP_WIDTH = cp.COMP_FIELD_LENGTH_CELLS   # 150 (planner x = sim x direction)
-MAP_HEIGHT = cp.COMP_FIELD_WIDTH_CELLS   # 40  (planner y = sim y direction)
-CELL_FT = cp.COMP_CELL_SIZE_FT           # 2.0
-start_cells = [(0, y) for y in range(MAP_HEIGHT)]
-goal_cells = [(MAP_WIDTH - 1, y) for y in range(MAP_HEIGHT)]
+start_cells = [(0, y) for y in range(GRID_ROWS)]
+goal_cells = [(GRID_COLS - 1, y) for y in range(GRID_ROWS)]
 
 
 ##DIFFERENT PLANNER ALGORITHMS
 if cp.PLANNER_ALGORITHM == "greedy":
     planner = GreedyBottleneckPlanner(
-        MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells
+        GRID_ROWS, GRID_COLS, start_cells, goal_cells
     )
-# elif cp.PLANNER_ALGORITHM == "rrt":
-#     from path_planning.rrt_planner import RRTPlanner
-#     planner = RRTPlanner(MAP_HEIGHT, MAP_WIDTH, start_cells, goal_cells)
+elif cp.PLANNER_ALGORITHM == "rrt":
+    planner = RRTPlanner(
+        GRID_ROWS, GRID_COLS, start_cells, goal_cells,
+        max_iter=3000, step_size=5, goal_bias=0.15,
+    )
+elif cp.PLANNER_ALGORITHM == "astar":
+    planner = AStarPlanner(
+        GRID_ROWS, GRID_COLS, start_cells, goal_cells,
+    )
 else:
     raise ValueError(f"Unknown PLANNER_ALGORITHM: {cp.PLANNER_ALGORITHM}")
+
+# Waypoint allocator — drone movement is independent of path planning
+allocator = WaypointAllocator(GRID_ROWS, GRID_COLS)
 
 # Cache the last live path so transient planner failures don't immediately hide the path
 last_live_path = None
@@ -263,9 +271,7 @@ while running:
         # Update cached live path: only replace when planner returns a valid path
         if result and isinstance(result, dict) and result.get("path"):
             last_live_path = result.get("path")
-        else:
-            # keep previous `last_live_path` so transient failures don't hide the path
-            pass
+
 
         # If planner reached goal, stop drones and begin freeze timer (show final frame)
         if result and isinstance(result, dict) and result.get("reached"):
@@ -276,11 +282,11 @@ while running:
             # Score using ground-truth mines (final evaluation)
             score_truth, G_truth, info_truth = compute_score(
                 path, drone_handler.mines_truth, A_min,
-                grid_w=MAP_WIDTH, grid_h=MAP_HEIGHT, N_oz=cp.WEIGHT_N_OZ)
+                grid_w=GRID_COLS, grid_h=GRID_ROWS, N_oz=cp.WEIGHT_N_OZ)
             # Score using detected mines (what we knew during planning)
             score_det, G_det, info_det = compute_score(
                 path, drone_handler.mines_detected, A_min,
-                grid_w=MAP_WIDTH, grid_h=MAP_HEIGHT, N_oz=cp.WEIGHT_N_OZ)
+                grid_w=GRID_COLS, grid_h=GRID_ROWS,  N_oz=cp.WEIGHT_N_OZ)
 
             print(format_score(score_truth, G_truth, info_truth,
                                algorithm=cp.PLANNER_ALGORITHM, seed=cp.MINE_SEED))
@@ -293,17 +299,27 @@ while running:
             planning_enabled = False
             freeze_until = time.time() + 3.0
 
-        # produce waypoints for drones based on planned path (in 2ft grid coords)
-        if result and result.get('path'):
-            waypoints_grid = planner.suggest_exploration_targets(
-                result['path'], confidence_map, clearance_map, mines_detected_high,
-                sensing_radius_high=int(cp.DETECTION_RADIUS_FT_LARGE / CELL_FT),
-                sensing_radius_low=int(cp.DETECTION_RADIUS_FT_SMALL / CELL_FT))
-            # Convert 2ft grid coords → feet for drone physics
-            waypoints = [(x * CELL_FT, y * CELL_FT) for x, y in waypoints_grid]
+        # produce waypoints for drones (independent of path planning)
+        half = cp.COMP_CELL_SIZE_FT / 2.0
+        drone_positions_grid = []
+        for d in drone_handler.drones:
+            grid_x = int(d.pos[0] / cp.COMP_CELL_SIZE_FT)
+            grid_y = int(d.pos[1] / cp.COMP_CELL_SIZE_FT)
+            drone_positions_grid.append((grid_x, grid_y))
+
+        waypoints_grid = allocator.assign(
+            drone_positions_grid=drone_positions_grid,
+            confidence_map=confidence_map,
+            clearance_map=clearance_map,
+            mines_detected_high=mines_detected_high,
+            sensing_radius_high=int(cp.DETECTION_RADIUS_FT_LARGE / cp.COMP_CELL_SIZE_FT),
+            sensing_radius_low=int(cp.DETECTION_RADIUS_FT_SMALL / cp.COMP_CELL_SIZE_FT))
+        waypoints = [(x * cp.COMP_CELL_SIZE_FT + half, y * cp.COMP_CELL_SIZE_FT + half) for x, y in waypoints_grid]
+
     else:
-        waypoints_grid = planner.fixed_targets(num_drones=len(drone_handler.drones))
-        waypoints = [(x * CELL_FT, y * CELL_FT) for x, y in waypoints_grid]
+        half = cp.COMP_CELL_SIZE_FT / 2.0
+        waypoints_grid = allocator.fixed_targets(num_drones=len(drone_handler.drones))
+        waypoints = [(x * cp.COMP_CELL_SIZE_FT + half, y * cp.COMP_CELL_SIZE_FT + half) for x, y in waypoints_grid]
         
     # physics update
     drone_handler.update(dt, waypoints)
@@ -325,24 +341,6 @@ while running:
         screen2.blit(heatmap_surface, (offset_x, offset_y))
 
     # 2. Draw Simulation (Drones, detected mines, etc.)
-    # Note: drone_handler draws its own background/grid which might cover the heatmap.
-    # We should modify how it draws or draw heatmap on top with blending if we want it visible.
-    # However, looking at DroneHandler.draw:
-    # It draws a Rect with BACKGROUND_COLOR.
-    # Let's draw the Heatmap *instead* of the background rect inside the arena area,
-    # or pass a flag to DroneHandler to skip background clearing.
-    # For now, simply drawing DroneHandler AFTER heatmap will obscure the heatmap.
-    # To fix this without modifying DroneHandler deeply, we can use blending or just let the heatmap act as the "floor".
-    # BUT DroneHandler draws grid lines and trees too.
-
-    # Strategy: Draw Heatmap. Then Draw DroneHandler elements manually?
-    # Or rely on transparency?
-    # Let's assume for this specific OpenGL main screen, we want the heatmap to be the dominant visual for the floor.
-
-    # To allow the heatmap to show through, we can manually draw the essential parts of DroneHandler here
-    # OR we draw DroneHandler first, then blend Heatmap on top using Multiply or Add.
-
-    # Let's try: Draw DroneHandler (Standard), then Overlay Heatmap with transparency.
     drone_handler.draw(screen2, (offset_x, offset_y))
 
     if heatmap_surface:
@@ -361,12 +359,13 @@ while running:
         persistent = getattr(planner, "persistent_best", None)
         live_path = last_live_path
 
-    # Helper to convert path cells (2ft grid) to screen points
+    # Helper to convert path cells (2ft grid) to screen points (centered in cell)
+    _half_cell_px = HEAT_EFFECTIVE_STEP / 2.0
     def to_screen(path):
         pts = []
         for px, py in path:
-            sx = offset_x + (px * CELL_FT * cp.PX_PER_FOOT)
-            sy = offset_y + (py * CELL_FT * cp.PX_PER_FOOT)
+            sx = offset_x + px * HEAT_EFFECTIVE_STEP + _half_cell_px
+            sy = offset_y + py * HEAT_EFFECTIVE_STEP + _half_cell_px
             pts.append((int(sx), int(sy)))
         return pts
 
